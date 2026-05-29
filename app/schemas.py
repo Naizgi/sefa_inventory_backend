@@ -143,10 +143,11 @@ class Product(ProductBase):
 
 
 # ==================== USER SCHEMAS ====================
+# ==================== USER SCHEMAS ====================
 class UserBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     email: EmailStr
-    role: str = Field(..., pattern="^(admin|salesman)$")
+    role: str = Field(..., pattern="^(admin|salesman|privileged_sales)$")  # ← UPDATED - added privileged_sales
     branch_id: Optional[int] = None
     active: bool = True
 
@@ -156,11 +157,11 @@ class UserCreate(UserBase):
 class UserUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     email: Optional[EmailStr] = None
-    role: Optional[str] = Field(None, pattern="^(admin|salesman)$")
+    role: Optional[str] = Field(None, pattern="^(admin|salesman|privileged_sales)$")  # ← UPDATED - added privileged_sales
     branch_id: Optional[int] = None
     active: Optional[bool] = None
     password: Optional[str] = Field(None, min_length=6)
-
+    
 class User(UserBase):
     id: int
     created_at: datetime
