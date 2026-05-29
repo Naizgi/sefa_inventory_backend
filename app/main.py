@@ -152,6 +152,9 @@ app.add_middleware(
         "http://smartlink.mellainnovation.com",
         "https://smartlink-inventory.up.railway.app",
         "http://smartlink-inventory.up.railway.app",
+        "https://sefa-inventory.com",
+        "http://sefa-inventory.com",
+        
     ],
     allow_credentials=True,
     allow_methods=["*"],
