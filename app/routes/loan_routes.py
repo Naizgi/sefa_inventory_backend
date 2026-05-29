@@ -12,6 +12,7 @@ from app.schemas import (
     LoanPaymentResponse, LoanSettleRequest
 )
 from app.utils.dependencies import get_current_user, require_admin
+from app.utils.permissions import require_loan_creation_privilege, require_loan_approval_privilege, require_privileged
 
 router = APIRouter(prefix="/api/loans", tags=["Loans"])
 
@@ -24,21 +25,17 @@ def generate_payment_number():
 # POST - Create loan (handle both with and without trailing slash)
 @router.post("", response_model=LoanResponse)
 @router.post("/", response_model=LoanResponse)
-def create_loan(  # Removed async
+def create_loan(
     loan_data: LoanCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_loan_creation_privilege)  # Only privileged users can create loans
 ):
-    """Create a new loan - deducts stock and records stock movement (Admin & Salesman)"""
+    """Create a new loan - deducts stock and records stock movement (Admin & Privileged Sales only)"""
     
     branch_id = current_user.branch_id
     
     if not branch_id:
         raise HTTPException(status_code=400, detail="User not assigned to a branch")
-    
-    # Salesman can only create loans for their branch
-    if current_user.role == "salesman" and current_user.branch_id != branch_id:
-        raise HTTPException(status_code=403, detail="Not authorized to create loans for this branch")
     
     try:
         # Calculate totals and validate stock
@@ -77,6 +74,11 @@ def create_loan(  # Removed async
         interest_amount = total_amount * (Decimal(str(loan_data.interest_rate)) / 100)
         total_with_interest = total_amount + interest_amount
         
+        # Determine if loan requires approval
+        # Loans from privileged_sales don't need approval, regular sales can't create loans anyway
+        requires_approval = not current_user.is_admin()
+        approval_status = "pending" if requires_approval else "approved"
+        
         # Create loan
         loan = Loan(
             loan_number=generate_loan_number(),
@@ -92,8 +94,15 @@ def create_loan(  # Removed async
             interest_amount=interest_amount,
             notes=loan_data.notes,
             created_by=current_user.id,
-            status='active'
+            status='active',
+            requires_approval=requires_approval,
+            approval_status=approval_status
         )
+        
+        # If admin created, auto-approve
+        if current_user.is_admin():
+            loan.approved_by = current_user.id
+            loan.approved_at = datetime.now()
         
         db.add(loan)
         db.flush()
@@ -131,6 +140,11 @@ def create_loan(  # Removed async
         creator = db.query(User).filter(User.id == loan.created_by).first()
         creator_name = creator.name if creator else "System"
         
+        approver_name = None
+        if loan.approved_by:
+            approver = db.query(User).filter(User.id == loan.approved_by).first()
+            approver_name = approver.name if approver else "System"
+        
         items_response = []
         for item in loan.items:
             product = db.query(Product).filter(Product.id == item.product_id).first()
@@ -162,8 +176,8 @@ def create_loan(  # Removed async
             "items": items_response,
             "payments": [],
             "created_by": creator_name,
-            "approved_by": None,
-            "approved_at": None,
+            "approved_by": approver_name,
+            "approved_at": loan.approved_at,
             "created_at": loan.created_at,
             "updated_at": loan.updated_at
         }
@@ -178,10 +192,45 @@ def create_loan(  # Removed async
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+
+# POST - Approve loan (Admin only)
+@router.post("/{loan_id}/approve")
+def approve_loan(
+    loan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_loan_approval_privilege)  # Admin only
+):
+    """Approve a loan (Admin only)"""
+    
+    loan = db.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    
+    if loan.approval_status == "approved":
+        raise HTTPException(status_code=400, detail="Loan already approved")
+    
+    loan.approval_status = "approved"
+    loan.approved_by = current_user.id
+    loan.approved_at = datetime.now()
+    
+    db.commit()
+    
+    approver = db.query(User).filter(User.id == loan.approved_by).first()
+    approver_name = approver.name if approver else "System"
+    
+    return {
+        "message": "Loan approved successfully",
+        "loan_id": loan.id,
+        "loan_number": loan.loan_number,
+        "approved_by": approver_name,
+        "approved_at": loan.approved_at
+    }
+
+
 # GET - Get all loans (handle both with and without trailing slash)
 @router.get("", response_model=List[LoanResponse])
 @router.get("/", response_model=List[LoanResponse])
-def get_loans(  # Removed async
+def get_loans(
     customer_name: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
@@ -189,14 +238,16 @@ def get_loans(  # Removed async
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get all loans with filters (Admin sees all, Salesman sees only their branch)"""
+    """Get all loans with filters (Admin sees all, Privileged sees all, Regular sees only their branch)"""
     
     query = db.query(Loan)
     
-    if current_user.role == "salesman":
+    # Regular sales users only see their branch's loans
+    if not current_user.is_privileged():
         if not current_user.branch_id:
             raise HTTPException(status_code=400, detail="User not assigned to a branch")
         query = query.filter(Loan.branch_id == current_user.branch_id)
+    # Admin and privileged sales see all loans
     
     if customer_name:
         query = query.filter(Loan.customer_name.ilike(f"%{customer_name}%"))
@@ -209,6 +260,11 @@ def get_loans(  # Removed async
     for loan in loans:
         creator = db.query(User).filter(User.id == loan.created_by).first()
         creator_name = creator.name if creator else "System"
+        
+        approver_name = None
+        if loan.approved_by:
+            approver = db.query(User).filter(User.id == loan.approved_by).first()
+            approver_name = approver.name if approver else "System"
         
         items_response = []
         for item in loan.items:
@@ -258,29 +314,30 @@ def get_loans(  # Removed async
             "items": items_response,
             "payments": payments_response,
             "created_by": creator_name,
-            "approved_by": None,
-            "approved_at": None,
+            "approved_by": approver_name,
+            "approved_at": loan.approved_at,
             "created_at": loan.created_at,
             "updated_at": loan.updated_at
         })
     
     return result
 
-# GET by ID - no change needed
+
+# GET by ID
 @router.get("/{loan_id}", response_model=LoanResponse)
-def get_loan(  # Removed async
+def get_loan(
     loan_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get loan by ID (Admin sees all, Salesman sees only their branch)"""
+    """Get loan by ID (Admin sees all, Privileged sees all, Regular sees only their branch)"""
     
     loan = db.query(Loan).filter(Loan.id == loan_id).first()
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
     
-    # Check permission for salesman
-    if current_user.role == "salesman":
+    # Check permission for non-privileged users
+    if not current_user.is_privileged():
         if not current_user.branch_id:
             raise HTTPException(status_code=400, detail="User not assigned to a branch")
         if loan.branch_id != current_user.branch_id:
@@ -288,6 +345,11 @@ def get_loan(  # Removed async
     
     creator = db.query(User).filter(User.id == loan.created_by).first()
     creator_name = creator.name if creator else "System"
+    
+    approver_name = None
+    if loan.approved_by:
+        approver = db.query(User).filter(User.id == loan.approved_by).first()
+        approver_name = approver.name if approver else "System"
     
     items_response = []
     for item in loan.items:
@@ -337,13 +399,14 @@ def get_loan(  # Removed async
         "items": items_response,
         "payments": payments_response,
         "created_by": creator_name,
-        "approved_by": None,
-        "approved_at": None,
+        "approved_by": approver_name,
+        "approved_at": loan.approved_at,
         "created_at": loan.created_at,
         "updated_at": loan.updated_at
     }
 
-# PUT - Update loan (handle both with and without trailing slash for collection? No, this is by ID)
+
+# PUT - Update loan (Admin only)
 @router.put("/{loan_id}", response_model=LoanResponse)
 def update_loan(
     loan_id: int,
@@ -377,6 +440,11 @@ def update_loan(
     
     creator = db.query(User).filter(User.id == loan.created_by).first()
     creator_name = creator.name if creator else "System"
+    
+    approver_name = None
+    if loan.approved_by:
+        approver = db.query(User).filter(User.id == loan.approved_by).first()
+        approver_name = approver.name if approver else "System"
     
     items_response = []
     for item in loan.items:
@@ -425,11 +493,12 @@ def update_loan(
         "items": items_response,
         "payments": payments_response,
         "created_by": creator_name,
-        "approved_by": None,
-        "approved_at": None,
+        "approved_by": approver_name,
+        "approved_at": loan.approved_at,
         "created_at": loan.created_at,
         "updated_at": loan.updated_at
     }
+
 
 # DELETE - Delete loan (Admin only)
 @router.delete("/{loan_id}", status_code=204)
@@ -474,26 +543,20 @@ def delete_loan(
     
     return None
 
-# POST - Add payment (no change needed)
+
+# POST - Add payment (Privileged users only)
 @router.post("/{loan_id}/payments", response_model=LoanPaymentResponse)
-def add_loan_payment(  # Removed async
+def add_loan_payment(
     loan_id: int,
     payment_data: LoanPaymentCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_privileged)  # Only privileged users can record payments
 ):
-    """Add a payment to a loan (Both Admin and Salesman can record payments for their branch)"""
+    """Add a payment to a loan (Admin & Privileged Sales only)"""
     
     loan = db.query(Loan).filter(Loan.id == loan_id).first()
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
-    
-    # Check permission for salesman - can only record payments for their branch
-    if current_user.role == "salesman":
-        if not current_user.branch_id:
-            raise HTTPException(status_code=400, detail="User not assigned to a branch")
-        if loan.branch_id != current_user.branch_id:
-            raise HTTPException(status_code=403, detail="Not authorized to record payment for this loan")
     
     if loan.status == 'settled':
         raise HTTPException(status_code=400, detail="Loan already settled")
@@ -545,26 +608,20 @@ def add_loan_payment(  # Removed async
         "created_at": payment.created_at
     }
 
-# POST - Settle loan (no change needed)
+
+# POST - Settle loan (Privileged users only)
 @router.post("/{loan_id}/settle")
-def settle_loan(  # Removed async
+def settle_loan(
     loan_id: int,
     settle_data: LoanSettleRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_privileged)  # Only privileged users can settle loans
 ):
-    """Settle a loan completely (Both Admin and Salesman can settle loans for their branch)"""
+    """Settle a loan completely (Admin & Privileged Sales only)"""
     
     loan = db.query(Loan).filter(Loan.id == loan_id).first()
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
-    
-    # Check permission for salesman - can only settle loans for their branch
-    if current_user.role == "salesman":
-        if not current_user.branch_id:
-            raise HTTPException(status_code=400, detail="User not assigned to a branch")
-        if loan.branch_id != current_user.branch_id:
-            raise HTTPException(status_code=403, detail="Not authorized to settle this loan")
     
     if loan.status == 'settled':
         raise HTTPException(status_code=400, detail="Loan already settled")

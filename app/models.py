@@ -5,6 +5,11 @@ from sqlalchemy.orm import relationship
 from app.database import Base
 
 # ==================== ENUMS ====================
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    SALESMAN = "salesman"
+    PRIVILEGED_SALES = "privileged_sales"  # New role for privileged sales users
+
 class PurchaseStatus(str, enum.Enum):
     PENDING = "pending"
     COMPLETED = "completed"
@@ -99,7 +104,7 @@ class Product(Base):
     refund_items = relationship("RefundItem", back_populates="product")
 
 
-# ==================== USER MODEL ====================
+# ==================== USER MODEL (UPDATED WITH PRIVILEGES) ====================
 class User(Base):
     __tablename__ = "users"
     
@@ -107,7 +112,7 @@ class User(Base):
     name = Column(String(255), nullable=False)
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(50), nullable=False)  # admin or salesman
+    role = Column(String(50), nullable=False)  # admin, salesman, or privileged_sales
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=True)
     active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -121,6 +126,42 @@ class User(Base):
     loans_created = relationship("Loan", foreign_keys="Loan.created_by", back_populates="creator")
     loans_approved = relationship("Loan", foreign_keys="Loan.approved_by", back_populates="approver")
     loan_payments = relationship("LoanPayment", back_populates="recorder")
+    
+    # Helper methods for permissions
+    def is_admin(self) -> bool:
+        return self.role == UserRole.ADMIN.value
+    
+    def is_privileged(self) -> bool:
+        """Check if user has privileged access (admin or privileged_sales)"""
+        return self.role in [UserRole.ADMIN.value, UserRole.PRIVILEGED_SALES.value]
+    
+    def can_create_loans(self) -> bool:
+        """Only admin and privileged sales can create loans"""
+        return self.is_privileged()
+    
+    def can_approve_loans(self) -> bool:
+        """Only admin can approve loans"""
+        return self.is_admin()
+    
+    def can_process_refunds(self) -> bool:
+        """Only admin and privileged sales can process refunds"""
+        return self.is_privileged()
+    
+    def can_manage_users(self) -> bool:
+        """Only admin can manage users"""
+        return self.is_admin()
+    
+    def can_manage_branches(self) -> bool:
+        """Only admin can manage branches"""
+        return self.is_admin()
+    
+    def can_view_reports(self) -> bool:
+        """All authenticated users can view basic reports"""
+        return True
+    
+    def can_export_data(self) -> bool:
+        """Only admin can export all data"""
+        return self.is_admin()
 
 
 # ==================== BANK ACCOUNT MODEL ====================
@@ -363,7 +404,7 @@ class PurchaseItem(Base):
     product = relationship("Product", back_populates="purchase_items")
 
 
-# ==================== LOAN SYSTEM MODELS ====================
+# ==================== LOAN SYSTEM MODELS (UPDATED WITH APPROVAL FLOW) ====================
 
 class Loan(Base):
     """Track loans given to customers"""
@@ -389,6 +430,10 @@ class Loan(Base):
     approved_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # New field for approval status
+    requires_approval = Column(Boolean, default=True)  # Loans from non-privileged users need approval
+    approval_status = Column(String(50), default="pending")  # pending, approved, rejected
     
     # Relationships
     branch = relationship("Branch", back_populates="loans")
@@ -458,7 +503,6 @@ class LoanSummary(Base):
     branch = relationship("Branch")
 
 
-# ==================== STOCK MOVEMENT MODEL ====================
 # ==================== STOCK MOVEMENT MODEL ====================
 class StockMovement(Base):
     __tablename__ = "stock_movements"
