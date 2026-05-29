@@ -1,12 +1,23 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
-from app.database import get_db
+from app.database import get_db, engine, SessionLocal
 from app.services import SettingsService
 from app.utils.dependencies import require_admin, get_current_user
 from app.models import User
+from app.config import settings as app_settings
 from pydantic import BaseModel
 import json
+import os
+import zipfile
+import io
+import tempfile
+import shutil
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["Settings"])
 
@@ -143,6 +154,328 @@ def delete_backup(
         return {"message": "Backup deleted successfully", "success": True}
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== DATABASE DOWNLOAD (ZIP) ====================
+
+@router.get("/database/download")
+@router.get("/database/download/")
+def download_database(
+    current_user: User = Depends(require_admin)
+):
+    """
+    Download the entire database as a ZIP file.
+    Only accessible by admin users.
+    """
+    try:
+        # Get database file path based on database type
+        if app_settings.DATABASE_TYPE == "sqlite":
+            db_path = os.path.join(app_settings.DB_DIR, app_settings.DB_FILENAME)
+            
+            if not os.path.exists(db_path):
+                raise HTTPException(status_code=404, detail="Database file not found")
+            
+            # Create a ZIP file in memory
+            zip_buffer = io.BytesIO()
+            
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                # Add the database file
+                zip_file.write(db_path, arcname=app_settings.DB_FILENAME)
+                
+                # Add a metadata file with backup information
+                metadata = {
+                    "backup_date": datetime.now().isoformat(),
+                    "database_type": app_settings.DATABASE_TYPE,
+                    "database_file": app_settings.DB_FILENAME,
+                    "app_version": app_settings.APP_VERSION,
+                    "backup_by": current_user.email,
+                    "file_size_bytes": os.path.getsize(db_path)
+                }
+                
+                # Add metadata to zip
+                zip_file.writestr("backup_info.json", json.dumps(metadata, indent=2))
+            
+            # Prepare the response
+            zip_buffer.seek(0)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"database_backup_{app_settings.APP_NAME}_{timestamp}.zip"
+            
+            return Response(
+                content=zip_buffer.getvalue(),
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}",
+                    "Content-Length": str(len(zip_buffer.getvalue()))
+                }
+            )
+        else:
+            # For MySQL, we would need to dump the database
+            raise HTTPException(status_code=501, detail="Download only supported for SQLite database")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Database download error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to download database: {str(e)}")
+
+# ==================== DATABASE RESTORE ====================
+
+@router.post("/database/restore")
+@router.post("/database/restore/")
+async def restore_database(
+    file: bytes = None,  # This will be handled differently - see below
+    current_user: User = Depends(require_admin)
+):
+    """
+    Restore database from a ZIP file.
+    Upload the ZIP file created by the download endpoint.
+    """
+    raise HTTPException(
+        status_code=400, 
+        detail="Use /database/restore/upload endpoint with multipart/form-data"
+    )
+
+@router.post("/database/restore/upload")
+async def restore_database_upload(
+    request: Request,
+    current_user: User = Depends(require_admin)
+):
+    """
+    Restore database from a ZIP file upload.
+    Upload the ZIP file created by the download endpoint.
+    """
+    try:
+        # This requires python-multipart
+        # pip install python-multipart
+        
+        form = await request.form()
+        file = form.get("file")
+        
+        if not file:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+        
+        # Check file extension
+        if not file.filename.endswith('.zip'):
+            raise HTTPException(status_code=400, detail="Only ZIP files are accepted")
+        
+        # Read file content
+        content = await file.read()
+        
+        # Verify it's a valid ZIP file
+        try:
+            zip_buffer = io.BytesIO(content)
+            with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
+                file_list = zip_file.namelist()
+                
+                # Find the database file in the ZIP
+                db_file_name = None
+                for name in file_list:
+                    if name.endswith('.db') or name == app_settings.DB_FILENAME:
+                        db_file_name = name
+                        break
+                
+                if not db_file_name:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="ZIP file does not contain a valid database file"
+                    )
+                
+                # Extract database file content
+                db_content = zip_file.read(db_file_name)
+                
+                # Read metadata if exists
+                metadata = {}
+                if "backup_info.json" in file_list:
+                    metadata_content = zip_file.read("backup_info.json")
+                    metadata = json.loads(metadata_content)
+                
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid ZIP file")
+        
+        # For SQLite, we can restore directly
+        if app_settings.DATABASE_TYPE == "sqlite":
+            db_path = os.path.join(app_settings.DB_DIR, app_settings.DB_FILENAME)
+            
+            # Create backup of current database before restore
+            if os.path.exists(db_path):
+                backup_path = f"{db_path}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                shutil.copy2(db_path, backup_path)
+                logger.info(f"Created backup of current database: {backup_path}")
+            
+            # Write the new database file
+            with open(db_path, 'wb') as f:
+                f.write(db_content)
+            
+            # Ensure proper permissions
+            os.chmod(db_path, 0o666)
+            
+            # Log the restore action
+            logger.info(f"Database restored by {current_user.email} from file: {file.filename}")
+            
+            return {
+                "message": "Database restored successfully",
+                "success": True,
+                "backup_metadata": metadata,
+                "previous_backup_created": os.path.exists(backup_path) if 'backup_path' in locals() else False
+            }
+        else:
+            raise HTTPException(status_code=501, detail="Restore only supported for SQLite database")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Database restore error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to restore database: {str(e)}")
+
+# Alternative simpler version using FastAPI's UploadFile
+from fastapi import UploadFile, File as FastAPIFile
+
+@router.post("/database/restore/simple")
+async def restore_database_simple(
+    backup_file: UploadFile = FastAPIFile(...),
+    current_user: User = Depends(require_admin)
+):
+    """
+    Simple database restore endpoint using UploadFile.
+    Upload the ZIP file created by the download endpoint.
+    """
+    try:
+        # Check file type
+        if not backup_file.filename.endswith('.zip'):
+            raise HTTPException(status_code=400, detail="Only ZIP files are accepted")
+        
+        # Read file content
+        content = await backup_file.read()
+        
+        # Verify and extract ZIP
+        try:
+            zip_buffer = io.BytesIO(content)
+            with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
+                file_list = zip_file.namelist()
+                
+                # Find database file
+                db_file_name = None
+                for name in file_list:
+                    if name.endswith('.db') or name == app_settings.DB_FILENAME:
+                        db_file_name = name
+                        break
+                
+                if not db_file_name:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="ZIP file does not contain a valid database file"
+                    )
+                
+                # Extract database content
+                db_content = zip_file.read(db_file_name)
+                
+                # Extract metadata
+                metadata = {}
+                if "backup_info.json" in file_list:
+                    metadata_content = zip_file.read("backup_info.json")
+                    metadata = json.loads(metadata_content)
+                
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid ZIP file")
+        
+        # Restore for SQLite
+        if app_settings.DATABASE_TYPE == "sqlite":
+            db_path = os.path.join(app_settings.DB_DIR, app_settings.DB_FILENAME)
+            
+            # Ensure directory exists
+            os.makedirs(app_settings.DB_DIR, exist_ok=True)
+            
+            # Create backup of current database
+            if os.path.exists(db_path):
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = f"{db_path}.pre_restore_{timestamp}"
+                shutil.copy2(db_path, backup_path)
+                logger.info(f"Pre-restore backup saved: {backup_path}")
+            
+            # Write new database
+            with open(db_path, 'wb') as f:
+                f.write(db_content)
+            
+            # Set permissions
+            os.chmod(db_path, 0o666)
+            
+            return {
+                "message": "Database restored successfully",
+                "success": True,
+                "filename": backup_file.filename,
+                "backup_info": metadata,
+                "restored_by": current_user.email,
+                "restored_at": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(status_code=501, detail="Restore only supported for SQLite")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Restore error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== DATABASE INFO ENDPOINT ====================
+
+@router.get("/database/info")
+@router.get("/database/info/")
+def get_database_info(
+    current_user: User = Depends(require_admin)
+):
+    """Get information about the current database"""
+    try:
+        if app_settings.DATABASE_TYPE == "sqlite":
+            db_path = os.path.join(app_settings.DB_DIR, app_settings.DB_FILENAME)
+            
+            if os.path.exists(db_path):
+                stat_info = os.stat(db_path)
+                size_mb = stat_info.st_size / (1024 * 1024)
+                
+                # Get table counts
+                from app.database import SessionLocal
+                from sqlalchemy import text
+                
+                db_session = SessionLocal()
+                try:
+                    # Get table list and counts
+                    result = db_session.execute(text("""
+                        SELECT name FROM sqlite_master 
+                        WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                        ORDER BY name
+                    """))
+                    tables = result.fetchall()
+                    
+                    table_info = []
+                    for table in tables:
+                        count_result = db_session.execute(text(f"SELECT COUNT(*) FROM {table[0]}"))
+                        count = count_result.scalar()
+                        table_info.append({"name": table[0], "rows": count})
+                    
+                finally:
+                    db_session.close()
+                
+                return {
+                    "database_type": "SQLite",
+                    "path": db_path,
+                    "exists": True,
+                    "size_mb": round(size_mb, 2),
+                    "last_modified": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                    "tables": table_info
+                }
+            else:
+                return {
+                    "database_type": "SQLite",
+                    "path": db_path,
+                    "exists": False,
+                    "size_mb": 0
+                }
+        else:
+            return {
+                "database_type": "MySQL",
+                "info": "Use /api/settings/system/info for MySQL details"
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
