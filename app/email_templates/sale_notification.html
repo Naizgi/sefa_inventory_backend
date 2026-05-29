@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #2FB8A6, #6FD3C3); color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+        .content { padding: 20px; background: #f9f9f9; }
+        .sale-details { background: white; padding: 15px; border-radius: 8px; margin: 15px 0; }
+        .items-table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        .items-table th, .items-table td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        .items-table th { background: #f0f0f0; }
+        .total { font-size: 18px; font-weight: bold; color: #2FB8A6; text-align: right; margin-top: 15px; }
+        .footer { text-align: center; padding: 20px; font-size: 12px; color: #666; }
+        .badge { display: inline-block; padding: 4px 8px; background: #e8f5e9; color: #4caf50; border-radius: 4px; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>🛒 New Sale Completed</h2>
+        </div>
+        <div class="content">
+            <p>Dear Admin,</p>
+            <p>A new sale has been completed in the system.</p>
+            
+            <div class="sale-details">
+                <h3>Sale Information</h3>
+                <p><strong>Invoice Number:</strong> {{ invoice_number }}</p>
+                <p><strong>Customer:</strong> {{ customer_name }}</p>
+                <p><strong>Branch:</strong> {{ branch_name }}</p>
+                <p><strong>Payment Method:</strong> {{ payment_method | capitalize }}</p>
+                <p><strong>Date & Time:</strong> {{ sale_date }}</p>
+            </div>
+            
+            <h3>Items Sold ({{ items_count }})</h3>
+            <table class="items-table">
+                <thead>
+                    <tr>
+                        <th>Product</th>
+                        <th>Quantity</th>
+                        <th>Unit Price</th>
+                        <th>Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in items %}
+                    <tr>
+                        <td>{{ item.product_name }}</td>
+                        <td>{{ item.quantity }}</td>
+                        <td>{{ item.unit_price | currency }}</td>
+                        <td>{{ item.line_total | currency }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            
+            <div class="total">
+                <strong>Total Amount: {{ total_amount | currency }}</strong>
+            </div>
+            
+            <div style="text-align: center; margin: 20px 0;">
+                <a href="{{ dashboard_url }}/sales/{{ sale_id }}" class="badge" style="background: #2FB8A6; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Sale Details</a>
+            </div>
+        </div>
+        <div class="footer">
+            <p>Inventory System - Sale Notification</p>
+            <p>This is an automated message. Please do not reply.</p>
+        </div>
+    </div>
+</body>
+</html>

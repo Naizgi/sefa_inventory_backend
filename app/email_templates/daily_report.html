@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #2FB8A6, #6FD3C3); color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+        .content { padding: 20px; background: #f9f9f9; }
+        .summary-card { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 15px 0; }
+        .summary-item { text-align: center; padding: 15px; background: #f0f0f0; border-radius: 8px; }
+        .summary-value { font-size: 24px; font-weight: bold; color: #2FB8A6; }
+        .summary-label { font-size: 12px; color: #666; margin-top: 5px; }
+        .table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        .table th, .table td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        .table th { background: #f0f0f0; font-weight: bold; }
+        .footer { text-align: center; padding: 20px; font-size: 12px; color: #666; }
+        .positive { color: #4caf50; }
+        .negative { color: #f44336; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>📊 Daily Sales Report</h2>
+            <p>{{ date }}</p>
+        </div>
+        <div class="content">
+            <div class="summary-card">
+                <h3>Today's Summary</h3>
+                <div class="summary-grid">
+                    <div class="summary-item">
+                        <div class="summary-value">{{ total_sales }}</div>
+                        <div class="summary-label">Total Sales</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-value">{{ format_currency(total_revenue) }}</div>
+                        <div class="summary-label">Gross Revenue</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-value">{{ format_currency(total_refunds) }}</div>
+                        <div class="summary-label">Refunds</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-value">{{ format_currency(net_revenue) }}</div>
+                        <div class="summary-label">Net Revenue</div>
+                    </div>
+                </div>
+            </div>
+
+            {% if top_products %}
+            <div class="summary-card">
+                <h3>🏆 Top Selling Products</h3>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Product</th>
+                            <th>Quantity Sold</th>
+                            <th>Revenue</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for product in top_products %}
+                        <tr>
+                            <td>{{ product.name }}</td>
+                            <td>{{ product.quantity }}</td>
+                            <td>{{ format_currency(product.revenue) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+
+            {% if low_stock_items %}
+            <div class="summary-card">
+                <h3>⚠️ Low Stock Items</h3>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Product</th>
+                            <th>Current Stock</th>
+                            <th>Reorder Level</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in low_stock_items %}
+                        <tr>
+                            <td>{{ item.product_name }}</td>
+                            <td class="negative">{{ item.current_stock }}</td>
+                            <td>{{ item.reorder_level }}</td>
+                            <td class="negative">Critical</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+
+            <div style="text-align: center; margin: 20px 0;">
+                <a href="{{ dashboard_url }}" class="button" style="background: #2FB8A6; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Full Report</a>
+            </div>
+        </div>
+        <div class="footer">
+            <p>Inventory System - Daily Report</p>
+            <p>This is an automated message. Please do not reply.</p>
+        </div>
+    </div>
+</body>
+</html>
