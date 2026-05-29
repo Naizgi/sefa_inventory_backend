@@ -1,7 +1,7 @@
 # app/main.py
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from app.database import engine, Base, SessionLocal, get_db
+from app.database import engine, Base, SessionLocal, get_db, init_db
 from app.config import settings
 from app.services import SettingsService, EmailScheduler
 from app.seeders.user_seeder import seed_users
@@ -10,6 +10,7 @@ from app.models import User
 from datetime import datetime
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
+import os
 
 # ==================== LOGGING ====================
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +51,8 @@ def run_daily_report():
 
 def start_scheduler():
     """Start the background scheduler for email notifications"""
-    if settings.ENVIRONMENT == "production":
+    # Check if scheduler should run (only in production)
+    if os.getenv("ENABLE_SCHEDULER", "true").lower() == "true":
         scheduler.add_job(
             func=run_low_stock_check,
             trigger="interval",
@@ -72,7 +74,7 @@ def start_scheduler():
         
         scheduler.start()
     else:
-        logger.info("Email scheduler disabled in development mode")
+        logger.info("Email scheduler disabled")
 
 def stop_scheduler():
     """Stop the background scheduler"""
@@ -90,9 +92,27 @@ app = FastAPI(
 # ==================== STARTUP & SHUTDOWN EVENTS ====================
 @app.on_event("startup")
 def startup():
+    # Log the database path
+    logger.info(f"Database path: {settings.DATABASE_URL}")
+    
+    # Check if using SQLite and volume is mounted
+    if "sqlite" in settings.DATABASE_URL:
+        db_path = settings.DATABASE_URL.replace("sqlite:///", "")
+        if os.path.exists(os.path.dirname(db_path)):
+            logger.info(f"✅ Database directory exists: {os.path.dirname(db_path)}")
+        else:
+            logger.warning(f"⚠️ Database directory does not exist: {os.path.dirname(db_path)}")
+    
+    # Initialize database tables
     logger.info("Creating database tables...")
-    Base.metadata.create_all(bind=engine)
+    try:
+        init_db()  # Use the new init_db function
+        logger.info("✅ Database tables created successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to create database tables: {e}")
+        raise
 
+    # Initialize default data
     db = SessionLocal()
     try:
         SettingsService.initialize_default_settings(db)
@@ -115,6 +135,9 @@ def startup():
 def shutdown():
     logger.info("Shutting down application...")
     stop_scheduler()
+    # Dispose the engine to close all connections
+    engine.dispose()
+    logger.info("Database connections closed")
 
 # ==================== CORS ====================
 app.add_middleware(
@@ -153,7 +176,6 @@ app.include_router(settings_router)
 # ==================== TEST EMAIL ENDPOINT ====================
 @app.post("/api/test/email")
 def test_email(
-   
     current_user: User = Depends(get_current_user)
 ):
     """Test email sending (Admin only)"""
@@ -183,18 +205,74 @@ def test_email(
     else:
         raise HTTPException(status_code=500, detail="Failed to send email")
 
-# ==================== ROOT ====================
+# ==================== ROOT ENDPOINTS ====================
 @app.get("/")
 def root():
     return {
         "message": f"Welcome to {settings.APP_NAME}",
         "version": settings.APP_VERSION,
+        "database": "SQLite" if "sqlite" in settings.DATABASE_URL else "MySQL/PostgreSQL",
         "docs": "/docs"
     }
 
 @app.get("/health")
 def health_check():
+    from app.database import check_db_health
+    
+    db_healthy = check_db_health()
+    
     return {
-        "status": "healthy",
+        "status": "healthy" if db_healthy else "unhealthy",
+        "database": "SQLite" if "sqlite" in settings.DATABASE_URL else "MySQL/PostgreSQL",
+        "database_status": "connected" if db_healthy else "disconnected",
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
+
+# ==================== DATABASE INFO ENDPOINT (optional, for debugging) ====================
+@app.get("/api/db-info")
+def db_info(current_user: User = Depends(get_current_user)):
+    """Get database information (Admin only)"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    import os
+    import sqlite3
+    
+    if "sqlite" in settings.DATABASE_URL:
+        db_path = settings.DATABASE_URL.replace("sqlite:///", "")
+        
+        try:
+            # Get database size
+            db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+            
+            # Get table counts
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = cursor.fetchall()
+            
+            table_info = {}
+            for table in tables:
+                cursor.execute(f"SELECT COUNT(*) FROM {table[0]}")
+                count = cursor.fetchone()[0]
+                table_info[table[0]] = count
+            
+            conn.close()
+            
+            return {
+                "database_type": "SQLite",
+                "database_path": db_path,
+                "database_size_mb": round(db_size / (1024 * 1024), 2),
+                "tables": table_info
+            }
+        except Exception as e:
+            return {
+                "database_type": "SQLite",
+                "database_path": db_path,
+                "error": str(e)
+            }
+    else:
+        return {
+            "database_type": "Other",
+            "url": settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "hidden"
+        }
