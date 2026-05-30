@@ -197,6 +197,8 @@ class Stock(Base):
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     quantity = Column(DECIMAL(12, 2), default=0)
+    quantity_with_vat = Column(DECIMAL(12, 2), default=0)  # ← ADD THIS
+    quantity_without_vat = Column(DECIMAL(12, 2), default=0)  # ← ADD THIS
     reorder_level = Column(DECIMAL(12, 2), default=0)
     
     # Relationships
@@ -340,7 +342,9 @@ class PurchaseOrder(Base):
     actual_delivery_date = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(50), default=PurchaseStatus.PENDING.value)
     subtotal = Column(DECIMAL(12, 2), default=0)
-    tax_amount = Column(DECIMAL(12, 2), default=0)
+    vat_rate = Column(DECIMAL(5, 2), default=15.00)  # ← ADD THIS - Fixed VAT rate (15%)
+    vat_amount = Column(DECIMAL(12, 2), default=0)   # ← ADD THIS - Calculated VAT amount
+    tax_amount = Column(DECIMAL(12, 2), default=0)    # Keep for backward compatibility
     shipping_cost = Column(DECIMAL(12, 2), default=0)
     discount_amount = Column(DECIMAL(12, 2), default=0)
     total_amount = Column(DECIMAL(12, 2), default=0)
@@ -353,7 +357,6 @@ class PurchaseOrder(Base):
     branch = relationship("Branch", back_populates="purchase_orders")
     items = relationship("PurchaseOrderItem", back_populates="purchase_order", cascade="all, delete-orphan")
     creator = relationship("User", foreign_keys=[created_by], back_populates="purchase_orders")
-
 
 class PurchaseOrderItem(Base):
     """Individual items in a purchase order"""
@@ -512,8 +515,9 @@ class StockMovement(Base):
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     change_qty = Column(DECIMAL(12, 2), nullable=False)
-    movement_type = Column(String(50), nullable=False)  # add, adjustment, sale, purchase, transfer_in, transfer_out, loan, refund
-    reference_id = Column(Integer)  # Can reference sale_id, purchase_id, loan_id, refund_id, etc.
+    movement_type = Column(String(50), nullable=False)
+    with_vat = Column(Boolean, default=True)  # ← ADD THIS - Track if movement was with VAT
+    reference_id = Column(Integer)
     notes = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     

@@ -29,8 +29,41 @@ from app.utils.dependencies import require_admin
 
 router = APIRouter(prefix="/api/purchases", tags=["Purchases"])
 
+# Fixed VAT rate (can be changed via settings in the future)
+DEFAULT_VAT_RATE = Decimal('15.00')
+
 def generate_order_number():
     return f"PO-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+def calculate_purchase_totals(subtotal: Decimal, vat_rate: Optional[Decimal] = None, 
+                              tax_amount: Decimal = Decimal('0'),
+                              shipping_cost: Decimal = Decimal('0'), 
+                              discount_amount: Decimal = Decimal('0')) -> dict:
+    """
+    Calculate purchase order totals including optional VAT.
+    If vat_rate is provided, VAT is calculated. Otherwise, uses tax_amount.
+    """
+    vat_amount = Decimal('0')
+    actual_vat_rate = Decimal('0')
+    
+    if vat_rate is not None and vat_rate > 0:
+        # Calculate VAT from rate
+        actual_vat_rate = vat_rate
+        vat_amount = subtotal * (vat_rate / Decimal('100'))
+    elif tax_amount > 0:
+        # Use provided tax amount
+        vat_amount = tax_amount
+        if subtotal > 0:
+            actual_vat_rate = (tax_amount / subtotal) * Decimal('100')
+    
+    total_amount = subtotal + vat_amount + shipping_cost - discount_amount
+    
+    return {
+        'subtotal': subtotal,
+        'vat_rate': actual_vat_rate,
+        'vat_amount': vat_amount,
+        'total_amount': total_amount
+    }
 
 # ==================== LEGACY PURCHASE ROUTES ====================
 
@@ -145,12 +178,12 @@ def create_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Create a new purchase order"""
+    """Create a new purchase order with optional VAT"""
     
     if not current_user.branch_id:
         raise HTTPException(status_code=400, detail="User not assigned to a branch")
     
-    # Calculate totals
+    # Calculate subtotal from items
     subtotal = Decimal('0')
     for item in purchase_data.items:
         quantity = Decimal(str(item.quantity_ordered))
@@ -158,22 +191,37 @@ def create_purchase_order(
         item_total = quantity * cost
         subtotal += item_total
     
-    tax = Decimal(str(purchase_data.tax_amount))
-    shipping = Decimal(str(purchase_data.shipping_cost))
-    discount = Decimal(str(purchase_data.discount_amount))
-    total_amount = subtotal + tax + shipping - discount
+    # Get VAT parameters
+    vat_rate = None
+    tax_amount = Decimal('0')
     
-    # Create purchase order
+    # Check for vat_rate in request
+    if hasattr(purchase_data, 'vat_rate') and purchase_data.vat_rate is not None:
+        vat_rate = Decimal(str(purchase_data.vat_rate))
+    # Check for tax_amount in request (legacy)
+    elif hasattr(purchase_data, 'tax_amount') and purchase_data.tax_amount > 0:
+        tax_amount = Decimal(str(purchase_data.tax_amount))
+    
+    # Get shipping and discount
+    shipping = Decimal(str(purchase_data.shipping_cost)) if hasattr(purchase_data, 'shipping_cost') else Decimal('0')
+    discount = Decimal(str(purchase_data.discount_amount)) if hasattr(purchase_data, 'discount_amount') else Decimal('0')
+    
+    # Calculate totals with VAT
+    totals = calculate_purchase_totals(subtotal, vat_rate, tax_amount, shipping, discount)
+    
+    # Create purchase order with VAT fields
     purchase_order = PurchaseOrder(
         order_number=generate_order_number(),
         branch_id=current_user.branch_id,
         supplier=purchase_data.supplier,
         expected_delivery_date=purchase_data.expected_delivery_date,
-        subtotal=subtotal,
-        tax_amount=tax,
+        subtotal=totals['subtotal'],
+        vat_rate=totals['vat_rate'],
+        vat_amount=totals['vat_amount'],
+        tax_amount=totals['vat_amount'],  # For backward compatibility
         shipping_cost=shipping,
         discount_amount=discount,
-        total_amount=total_amount,
+        total_amount=totals['total_amount'],
         notes=purchase_data.notes,
         created_by=current_user.id,
         status='pending'
@@ -232,6 +280,8 @@ def create_purchase_order(
         "actual_delivery_date": purchase_order.actual_delivery_date,
         "status": purchase_order.status,
         "subtotal": float(purchase_order.subtotal),
+        "vat_rate": float(purchase_order.vat_rate) if purchase_order.vat_rate else 0,
+        "vat_amount": float(purchase_order.vat_amount) if purchase_order.vat_amount else 0,
         "tax_amount": float(purchase_order.tax_amount),
         "shipping_cost": float(purchase_order.shipping_cost),
         "discount_amount": float(purchase_order.discount_amount),
@@ -255,10 +305,9 @@ def get_purchase_orders(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get all purchase orders"""
+    """Get all purchase orders with VAT information"""
     
     try:
-        # Build query
         query = db.query(PurchaseOrder)
         
         if supplier:
@@ -272,17 +321,13 @@ def get_purchase_orders(
             end_date = datetime.combine(to_date, datetime.max.time())
             query = query.filter(PurchaseOrder.order_date <= end_date)
         
-        # Execute query
         orders = query.order_by(PurchaseOrder.order_date.desc()).offset(skip).limit(limit).all()
         
-        # Build response without lazy loading issues
         result = []
         for order in orders:
-            # Get creator name
             creator = db.query(User).filter(User.id == order.created_by).first()
             creator_name = creator.name if creator else "System"
             
-            # Build items response
             items_response = []
             for item in order.items:
                 product = db.query(Product).filter(Product.id == item.product_id).first()
@@ -308,6 +353,8 @@ def get_purchase_orders(
                 "actual_delivery_date": order.actual_delivery_date,
                 "status": order.status,
                 "subtotal": float(order.subtotal),
+                "vat_rate": float(order.vat_rate) if order.vat_rate else 0,
+                "vat_amount": float(order.vat_amount) if order.vat_amount else 0,
                 "tax_amount": float(order.tax_amount),
                 "shipping_cost": float(order.shipping_cost),
                 "discount_amount": float(order.discount_amount),
@@ -333,7 +380,7 @@ def get_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get purchase order by ID"""
+    """Get purchase order by ID with VAT information"""
     order = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -366,6 +413,8 @@ def get_purchase_order(
         "actual_delivery_date": order.actual_delivery_date,
         "status": order.status,
         "subtotal": float(order.subtotal),
+        "vat_rate": float(order.vat_rate) if order.vat_rate else 0,
+        "vat_amount": float(order.vat_amount) if order.vat_amount else 0,
         "tax_amount": float(order.tax_amount),
         "shipping_cost": float(order.shipping_cost),
         "discount_amount": float(order.discount_amount),
@@ -535,6 +584,8 @@ def update_purchase_order(
         "actual_delivery_date": purchase_order.actual_delivery_date,
         "status": purchase_order.status,
         "subtotal": float(purchase_order.subtotal),
+        "vat_rate": float(purchase_order.vat_rate) if purchase_order.vat_rate else 0,
+        "vat_amount": float(purchase_order.vat_amount) if purchase_order.vat_amount else 0,
         "tax_amount": float(purchase_order.tax_amount),
         "shipping_cost": float(purchase_order.shipping_cost),
         "discount_amount": float(purchase_order.discount_amount),
@@ -576,7 +627,7 @@ def get_purchase_report(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get purchase report"""
+    """Get purchase report with VAT information"""
     
     if not to_date:
         to_date = date.today()
@@ -595,6 +646,7 @@ def get_purchase_report(
     ).all()
     
     total_purchase_cost = sum(po.total_amount for po in purchase_orders)
+    total_vat_amount = sum(po.vat_amount for po in purchase_orders if po.vat_amount)
     total_legacy_cost = sum(p.total_amount for p in purchases)
     
     supplier_totals = {}
@@ -630,6 +682,7 @@ def get_purchase_report(
         "summary": {
             "total_purchase_orders": len(purchase_orders),
             "total_purchase_cost": float(total_purchase_cost),
+            "total_vat_amount": float(total_vat_amount),
             "total_legacy_purchases": len(purchases),
             "total_legacy_cost": float(total_legacy_cost),
             "total_all_purchases": float(total_purchase_cost + total_legacy_cost),
@@ -655,6 +708,8 @@ def get_purchase_report(
                 "supplier": po.supplier,
                 "order_date": po.order_date.isoformat(),
                 "total_amount": float(po.total_amount),
+                "vat_amount": float(po.vat_amount) if po.vat_amount else 0,
+                "vat_rate": float(po.vat_rate) if po.vat_rate else 0,
                 "status": po.status,
                 "items_count": len(po.items)
             }

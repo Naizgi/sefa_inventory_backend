@@ -143,11 +143,10 @@ class Product(ProductBase):
 
 
 # ==================== USER SCHEMAS ====================
-# ==================== USER SCHEMAS ====================
 class UserBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     email: EmailStr
-    role: str = Field(..., pattern="^(admin|salesman|privileged_sales)$")  # ← UPDATED - added privileged_sales
+    role: str = Field(..., pattern="^(admin|salesman|privileged_sales)$")
     branch_id: Optional[int] = None
     active: bool = True
 
@@ -157,7 +156,7 @@ class UserCreate(UserBase):
 class UserUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     email: Optional[EmailStr] = None
-    role: Optional[str] = Field(None, pattern="^(admin|salesman|privileged_sales)$")  # ← UPDATED - added privileged_sales
+    role: Optional[str] = Field(None, pattern="^(admin|salesman|privileged_sales)$")
     branch_id: Optional[int] = None
     active: Optional[bool] = None
     password: Optional[str] = Field(None, min_length=6)
@@ -170,11 +169,13 @@ class User(UserBase):
         from_attributes = True
 
 
-# ==================== STOCK SCHEMAS ====================
+# ==================== STOCK SCHEMAS (UPDATED WITH VAT BREAKDOWN) ====================
 class StockBase(BaseModel):
     branch_id: int
     product_id: int
     quantity: float = Field(0, ge=0)
+    quantity_with_vat: float = Field(0, ge=0, description="Stock quantity purchased with VAT")
+    quantity_without_vat: float = Field(0, ge=0, description="Stock quantity purchased without VAT")
     reorder_level: float = Field(0, ge=0)
 
 class StockCreate(StockBase):
@@ -182,6 +183,8 @@ class StockCreate(StockBase):
 
 class StockUpdate(BaseModel):
     quantity: Optional[float] = Field(None, ge=0)
+    quantity_with_vat: Optional[float] = Field(None, ge=0)
+    quantity_without_vat: Optional[float] = Field(None, ge=0)
     reorder_level: Optional[float] = Field(None, ge=0)
 
 class Stock(StockBase):
@@ -195,8 +198,33 @@ class StockResponse(BaseModel):
     product_name: str
     product_sku: str
     quantity: float
+    stock_with_vat: float = Field(0, description="Stock quantity with VAT")
+    stock_without_vat: float = Field(0, description="Stock quantity without VAT")
     reorder_level: float
     status: str  # "normal", "low", "out_of_stock"
+
+
+# ==================== STOCK MOVEMENT SCHEMAS ====================
+class StockMovementBase(BaseModel):
+    branch_id: int
+    product_id: int
+    change_qty: float
+    movement_type: str
+    with_vat: bool = Field(True, description="Whether this movement was with VAT")
+    notes: Optional[str] = None
+
+class StockMovementCreate(StockMovementBase):
+    pass
+
+class StockMovementResponse(StockMovementBase):
+    id: int
+    user_id: Optional[int] = None
+    user_name: Optional[str] = None
+    reference_id: Optional[int] = None
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
 
 
 # ==================== ENHANCED SALE SCHEMAS ====================
@@ -477,7 +505,7 @@ class TicketSummary(BaseModel):
     ticket_utilization_rate: float = 0
 
 
-# ==================== PURCHASE ORDER SCHEMAS ====================
+# ==================== PURCHASE ORDER SCHEMAS (UPDATED WITH VAT) ====================
 class PurchaseOrderItemBase(BaseModel):
     product_id: int
     quantity_ordered: Decimal = Field(gt=0)
@@ -499,7 +527,8 @@ class PurchaseOrderItemResponse(PurchaseOrderItemBase):
 class PurchaseOrderBase(BaseModel):
     supplier: str
     expected_delivery_date: Optional[date] = None
-    tax_amount: Decimal = Field(default=0, ge=0)
+    vat_rate: Optional[float] = Field(default=None, ge=0, le=100, description="VAT rate percentage (e.g., 15 for 15%). If null or 0, no VAT applied.")
+    tax_amount: Decimal = Field(default=0, ge=0, description="Legacy tax amount. If vat_rate is provided, this is calculated automatically.")
     shipping_cost: Decimal = Field(default=0, ge=0)
     discount_amount: Decimal = Field(default=0, ge=0)
     notes: Optional[str] = None
@@ -520,6 +549,8 @@ class PurchaseOrderResponse(PurchaseOrderBase):
     actual_delivery_date: Optional[datetime] = None
     status: PurchaseStatus
     subtotal: Decimal
+    vat_rate: Decimal = Field(default=0, description="Applied VAT rate")
+    vat_amount: Decimal = Field(default=0, description="Calculated VAT amount")
     total_amount: Decimal
     items: List[PurchaseOrderItemResponse]
     created_by: str

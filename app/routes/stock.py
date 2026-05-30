@@ -18,7 +18,7 @@ def get_branch_stock(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get stock for a specific branch"""
+    """Get stock for a specific branch with VAT breakdown"""
     
     try:
         branch = db.query(Branch).filter(Branch.id == branch_id).first()
@@ -51,6 +51,8 @@ def get_branch_stock(
                 "product_name": product.name,
                 "product_sku": product.sku,
                 "quantity": float(stock.quantity),
+                "stock_with_vat": float(stock.quantity_with_vat) if hasattr(stock, 'quantity_with_vat') and stock.quantity_with_vat else 0,
+                "stock_without_vat": float(stock.quantity_without_vat) if hasattr(stock, 'quantity_without_vat') and stock.quantity_without_vat else 0,
                 "reorder_level": float(stock.reorder_level),
                 "status": status
             })
@@ -72,7 +74,7 @@ def get_my_branch_stock(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get stock for the current user's branch"""
+    """Get stock for the current user's branch with VAT breakdown"""
     
     try:
         if not current_user.branch_id:
@@ -101,6 +103,8 @@ def get_my_branch_stock(
                 "product_name": product.name,
                 "product_sku": product.sku,
                 "quantity": float(stock.quantity),
+                "stock_with_vat": float(stock.quantity_with_vat) if hasattr(stock, 'quantity_with_vat') and stock.quantity_with_vat else 0,
+                "stock_without_vat": float(stock.quantity_without_vat) if hasattr(stock, 'quantity_without_vat') and stock.quantity_without_vat else 0,
                 "reorder_level": float(stock.reorder_level),
                 "status": status
             })
@@ -114,18 +118,19 @@ def get_my_branch_stock(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# POST - Add stock
+# POST - Add stock with VAT tracking
 @router.post("/{branch_id}/{product_id}/add")
 @router.post("/{branch_id}/{product_id}/add/")
 def add_stock(
     branch_id: int,
     product_id: int,
     quantity: float = Query(..., gt=0),
+    with_vat: bool = Query(True, description="Whether this stock was purchased with VAT"),
     notes: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Add stock to a branch"""
+    """Add stock to a branch with VAT tracking"""
     
     try:
         branch = db.query(Branch).filter(Branch.id == branch_id).first()
@@ -149,28 +154,59 @@ def add_stock(
         
         if stock:
             old_quantity = float(stock.quantity)
+            old_quantity_with_vat = float(stock.quantity_with_vat) if hasattr(stock, 'quantity_with_vat') and stock.quantity_with_vat else 0
+            old_quantity_without_vat = float(stock.quantity_without_vat) if hasattr(stock, 'quantity_without_vat') and stock.quantity_without_vat else 0
             new_quantity = float(stock.quantity) + quantity
+            
+            # Update VAT-specific quantities
+            if with_vat:
+                new_quantity_with_vat = old_quantity_with_vat + quantity
+                new_quantity_without_vat = old_quantity_without_vat
+            else:
+                new_quantity_with_vat = old_quantity_with_vat
+                new_quantity_without_vat = old_quantity_without_vat + quantity
+            
             stock.quantity = Decimal(str(new_quantity))
+            if hasattr(stock, 'quantity_with_vat'):
+                stock.quantity_with_vat = Decimal(str(new_quantity_with_vat))
+            if hasattr(stock, 'quantity_without_vat'):
+                stock.quantity_without_vat = Decimal(str(new_quantity_without_vat))
         else:
             old_quantity = 0
+            old_quantity_with_vat = 0
+            old_quantity_without_vat = 0
             new_quantity = quantity
+            
+            if with_vat:
+                new_quantity_with_vat = quantity
+                new_quantity_without_vat = 0
+            else:
+                new_quantity_with_vat = 0
+                new_quantity_without_vat = quantity
+            
             stock = Stock(
                 branch_id=branch_id,
                 product_id=product_id,
                 quantity=Decimal(str(quantity)),
+                quantity_with_vat=Decimal(str(new_quantity_with_vat)),
+                quantity_without_vat=Decimal(str(new_quantity_without_vat)),
                 reorder_level=10
             )
             db.add(stock)
         
-        # Record stock movement (without new_quantity and reason)
+        # Record stock movement with VAT info
+        vat_status = "with VAT" if with_vat else "without VAT"
         stock_movement = StockMovement(
             branch_id=branch_id,
             product_id=product_id,
             user_id=current_user.id,
             change_qty=Decimal(str(quantity)),
             movement_type="add",
-            notes=notes or f"Stock added by {current_user.name} (Role: {current_user.role})"
+            notes=notes or f"Stock added by {current_user.name} (Role: {current_user.role}) - {vat_status}"
         )
+        # Add with_vat attribute if it exists in the model
+        if hasattr(stock_movement, 'with_vat'):
+            stock_movement.with_vat = with_vat
         db.add(stock_movement)
         
         db.commit()
@@ -178,15 +214,20 @@ def add_stock(
         
         return {
             "success": True,
-            "message": f"Added {quantity} units of {product.name}",
+            "message": f"Added {quantity} units of {product.name} ({vat_status})",
             "product_id": product_id,
             "product_name": product.name,
             "branch_id": branch_id,
             "branch_name": branch.name,
             "old_quantity": old_quantity,
             "new_quantity": new_quantity,
+            "old_quantity_with_vat": old_quantity_with_vat,
+            "new_quantity_with_vat": new_quantity_with_vat if with_vat else new_quantity_without_vat,
+            "old_quantity_without_vat": old_quantity_without_vat,
+            "new_quantity_without_vat": new_quantity_without_vat if not with_vat else new_quantity_with_vat,
             "added_by": current_user.name,
-            "role": current_user.role
+            "role": current_user.role,
+            "with_vat": with_vat
         }
         
     except HTTPException:
@@ -244,7 +285,7 @@ def adjust_stock(
         if reason:
             notes_text = f"Reason: {reason} | {notes_text}"
         
-        # Record stock movement (without new_quantity and reason)
+        # Record stock movement
         stock_movement = StockMovement(
             branch_id=branch_id,
             product_id=product_id,
@@ -319,6 +360,8 @@ def initialize_branch_stock(
                     branch_id=branch_id,
                     product_id=product.id,
                     quantity=0,
+                    quantity_with_vat=0,
+                    quantity_without_vat=0,
                     reorder_level=10
                 )
                 db.add(stock)
@@ -346,7 +389,7 @@ def initialize_branch_stock(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# GET - Stock history for a product
+# GET - Stock history for a product with VAT info
 @router.get("/{branch_id}/history/{product_id}")
 def get_stock_history(
     branch_id: int,
@@ -355,7 +398,7 @@ def get_stock_history(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get stock movement history for a specific product in a branch"""
+    """Get stock movement history for a specific product in a branch with VAT info"""
     
     try:
         branch = db.query(Branch).filter(Branch.id == branch_id).first()
@@ -402,6 +445,9 @@ def get_stock_history(
                 if match:
                     reason = match.group(1).strip()
             
+            # Get with_vat status
+            with_vat = getattr(movement, 'with_vat', True)
+            
             result.append({
                 "id": movement.id,
                 "branch_id": movement.branch_id,
@@ -410,6 +456,7 @@ def get_stock_history(
                 "user_name": user_name,
                 "quantity_change": float(movement.change_qty),
                 "type": movement_type_display,
+                "with_vat": with_vat,
                 "reason": reason,
                 "notes": movement.notes,
                 "created_at": movement.created_at.isoformat() if movement.created_at else None
