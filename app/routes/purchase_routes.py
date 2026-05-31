@@ -15,7 +15,8 @@ from app.models import (
     PurchaseItem as PurchaseItemModel, 
     Product, 
     Stock, 
-    StockMovement
+    StockMovement,
+    BankAccount
 )
 from app.schemas import (
     PurchaseCreate, 
@@ -191,7 +192,7 @@ def create_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Create a new purchase order with optional VAT"""
+    """Create a new purchase order with optional VAT and bank account"""
     
     if not current_user.branch_id:
         raise HTTPException(status_code=400, detail="User not assigned to a branch")
@@ -222,7 +223,21 @@ def create_purchase_order(
     # Calculate totals with VAT
     totals = calculate_purchase_totals(subtotal, vat_rate, tax_amount, shipping, discount)
     
-    # Create purchase order with VAT fields
+    # Validate bank account if provided
+    bank_account_name = None
+    bank_name = None
+    if purchase_data.bank_account_id:
+        bank_account = db.query(BankAccount).filter(
+            BankAccount.id == purchase_data.bank_account_id,
+            BankAccount.branch_id == current_user.branch_id,
+            BankAccount.is_active == True
+        ).first()
+        if not bank_account:
+            raise HTTPException(status_code=404, detail="Bank account not found or inactive")
+        bank_account_name = bank_account.account_name
+        bank_name = bank_account.bank_name
+    
+    # Create purchase order with VAT and bank account fields
     purchase_order = PurchaseOrder(
         order_number=generate_order_number(),
         branch_id=current_user.branch_id,
@@ -231,13 +246,17 @@ def create_purchase_order(
         subtotal=totals['subtotal'],
         vat_rate=totals['vat_rate'],
         vat_amount=totals['vat_amount'],
-        tax_amount=totals['vat_amount'],  # For backward compatibility
+        tax_amount=totals['vat_amount'],
         shipping_cost=shipping,
         discount_amount=discount,
         total_amount=totals['total_amount'],
         notes=purchase_data.notes,
         created_by=current_user.id,
-        status='pending'
+        status='pending',
+        # NEW: Bank account fields
+        bank_account_id=purchase_data.bank_account_id,
+        payment_reference=purchase_data.payment_reference,
+        payment_date=datetime.combine(purchase_data.payment_date, datetime.min.time()) if purchase_data.payment_date else None
     )
     
     db.add(purchase_order)
@@ -303,7 +322,13 @@ def create_purchase_order(
         "created_by": creator_name,
         "created_at": purchase_order.created_at,
         "updated_at": purchase_order.updated_at,
-        "items": items_response
+        "items": items_response,
+        # NEW: Bank account fields in response
+        "bank_account_id": purchase_order.bank_account_id,
+        "bank_account_name": bank_account_name,
+        "bank_name": bank_name,
+        "payment_reference": purchase_order.payment_reference,
+        "payment_date": purchase_order.payment_date
     }
 
 @router.get("/orders", response_model=List[PurchaseOrderResponse])
@@ -318,7 +343,7 @@ def get_purchase_orders(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get all purchase orders with VAT information"""
+    """Get all purchase orders with VAT and bank account information"""
     
     try:
         query = db.query(PurchaseOrder)
@@ -340,6 +365,15 @@ def get_purchase_orders(
         for order in orders:
             creator = db.query(User).filter(User.id == order.created_by).first()
             creator_name = creator.name if creator else "System"
+            
+            # Get bank account info if exists
+            bank_account_name = None
+            bank_name = None
+            if order.bank_account_id:
+                bank_account = db.query(BankAccount).filter(BankAccount.id == order.bank_account_id).first()
+                if bank_account:
+                    bank_account_name = bank_account.account_name
+                    bank_name = bank_account.bank_name
             
             items_response = []
             for item in order.items:
@@ -376,7 +410,13 @@ def get_purchase_orders(
                 "created_by": creator_name,
                 "created_at": order.created_at,
                 "updated_at": order.updated_at,
-                "items": items_response
+                "items": items_response,
+                # NEW: Bank account fields
+                "bank_account_id": order.bank_account_id,
+                "bank_account_name": bank_account_name,
+                "bank_name": bank_name,
+                "payment_reference": order.payment_reference,
+                "payment_date": order.payment_date
             })
         
         return result
@@ -393,13 +433,22 @@ def get_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get purchase order by ID with VAT information"""
+    """Get purchase order by ID with VAT and bank account information"""
     order = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Purchase order not found")
     
     creator = db.query(User).filter(User.id == order.created_by).first()
     creator_name = creator.name if creator else "System"
+    
+    # Get bank account info if exists
+    bank_account_name = None
+    bank_name = None
+    if order.bank_account_id:
+        bank_account = db.query(BankAccount).filter(BankAccount.id == order.bank_account_id).first()
+        if bank_account:
+            bank_account_name = bank_account.account_name
+            bank_name = bank_account.bank_name
     
     items_response = []
     for item in order.items:
@@ -436,7 +485,13 @@ def get_purchase_order(
         "created_by": creator_name,
         "created_at": order.created_at,
         "updated_at": order.updated_at,
-        "items": items_response
+        "items": items_response,
+        # NEW: Bank account fields
+        "bank_account_id": order.bank_account_id,
+        "bank_account_name": bank_account_name,
+        "bank_name": bank_name,
+        "payment_reference": order.payment_reference,
+        "payment_date": order.payment_date
     }
 
 @router.post("/orders/{order_id}/receive")
@@ -509,15 +564,13 @@ def receive_purchase_order(
                 old_with_vat = float(stock.quantity_with_vat) if hasattr(stock, 'quantity_with_vat') and stock.quantity_with_vat else 0
                 new_with_vat = old_with_vat + float(quantity_received)
                 stock.quantity_with_vat = Decimal(str(new_with_vat))
-                # Keep without_vat unchanged
             else:
                 # This purchase has NO VAT - add to without_vat
                 old_without_vat = float(stock.quantity_without_vat) if hasattr(stock, 'quantity_without_vat') and stock.quantity_without_vat else 0
                 new_without_vat = old_without_vat + float(quantity_received)
                 stock.quantity_without_vat = Decimal(str(new_without_vat))
-                # Keep with_vat unchanged
             
-            # Ensure the fields exist (migration for old records)
+            # Ensure the fields exist
             if hasattr(stock, 'quantity_with_vat') and stock.quantity_with_vat is None:
                 stock.quantity_with_vat = 0
             if hasattr(stock, 'quantity_without_vat') and stock.quantity_without_vat is None:
@@ -553,7 +606,6 @@ def receive_purchase_order(
             reference_id=purchase_order.id,
             notes=f"Received from PO: {purchase_order.order_number} - {vat_status}"
         )
-        # Add with_vat attribute if it exists
         if hasattr(stock_movement, 'with_vat'):
             stock_movement.with_vat = has_vat
         db.add(stock_movement)
@@ -610,12 +662,29 @@ def update_purchase_order(
     if update_data.notes:
         purchase_order.notes = update_data.notes
     
+    # NEW: Update bank account fields if provided
+    if update_data.bank_account_id is not None:
+        purchase_order.bank_account_id = update_data.bank_account_id
+    if update_data.payment_reference is not None:
+        purchase_order.payment_reference = update_data.payment_reference
+    if update_data.payment_date is not None:
+        purchase_order.payment_date = datetime.combine(update_data.payment_date, datetime.min.time())
+    
     purchase_order.updated_at = datetime.now()
     db.commit()
     db.refresh(purchase_order)
     
     creator = db.query(User).filter(User.id == purchase_order.created_by).first()
     creator_name = creator.name if creator else "System"
+    
+    # Get bank account info if exists
+    bank_account_name = None
+    bank_name = None
+    if purchase_order.bank_account_id:
+        bank_account = db.query(BankAccount).filter(BankAccount.id == purchase_order.bank_account_id).first()
+        if bank_account:
+            bank_account_name = bank_account.account_name
+            bank_name = bank_account.bank_name
     
     items_response = []
     for item in purchase_order.items:
@@ -652,7 +721,13 @@ def update_purchase_order(
         "created_by": creator_name,
         "created_at": purchase_order.created_at,
         "updated_at": purchase_order.updated_at,
-        "items": items_response
+        "items": items_response,
+        # NEW: Bank account fields
+        "bank_account_id": purchase_order.bank_account_id,
+        "bank_account_name": bank_account_name,
+        "bank_name": bank_name,
+        "payment_reference": purchase_order.payment_reference,
+        "payment_date": purchase_order.payment_date
     }
 
 @router.delete("/orders/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -685,7 +760,7 @@ def get_purchase_report(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get purchase report with VAT information"""
+    """Get purchase report with VAT and bank account information"""
     
     if not to_date:
         to_date = date.today()
@@ -706,6 +781,24 @@ def get_purchase_report(
     total_purchase_cost = sum(po.total_amount for po in purchase_orders)
     total_vat_amount = sum(po.vat_amount for po in purchase_orders if po.vat_amount)
     total_legacy_cost = sum(p.total_amount for p in purchases)
+    
+    # NEW: Bank account summary
+    bank_account_summary = {}
+    for po in purchase_orders:
+        if po.bank_account_id:
+            bank_account = db.query(BankAccount).filter(BankAccount.id == po.bank_account_id).first()
+            if bank_account:
+                key = f"{bank_account.bank_name} - {bank_account.account_number}"
+                if key not in bank_account_summary:
+                    bank_account_summary[key] = {
+                        "bank_name": bank_account.bank_name,
+                        "account_number": bank_account.account_number,
+                        "account_name": bank_account.account_name,
+                        "total_amount": 0,
+                        "order_count": 0
+                    }
+                bank_account_summary[key]["total_amount"] += float(po.total_amount)
+                bank_account_summary[key]["order_count"] += 1
     
     supplier_totals = {}
     for po in purchase_orders:
@@ -746,6 +839,17 @@ def get_purchase_report(
             "total_all_purchases": float(total_purchase_cost + total_legacy_cost),
             "average_order_value": float(total_purchase_cost / len(purchase_orders)) if purchase_orders else 0
         },
+        # NEW: Bank account summary in report
+        "bank_account_summary": [
+            {
+                "bank_name": data["bank_name"],
+                "account_number": data["account_number"],
+                "account_name": data["account_name"],
+                "total_amount": data["total_amount"],
+                "order_count": data["order_count"]
+            }
+            for data in bank_account_summary.values()
+        ],
         "supplier_breakdown": [
             {"supplier": supplier, "total_amount": float(amount)}
             for supplier, amount in sorted(supplier_totals.items(), key=lambda x: x[1], reverse=True)
@@ -769,7 +873,10 @@ def get_purchase_report(
                 "vat_amount": float(po.vat_amount) if po.vat_amount else 0,
                 "vat_rate": float(po.vat_rate) if po.vat_rate else 0,
                 "status": po.status,
-                "items_count": len(po.items)
+                "items_count": len(po.items),
+                # NEW: Bank account info in orders list
+                "bank_name": db.query(BankAccount).filter(BankAccount.id == po.bank_account_id).first().bank_name if po.bank_account_id else None,
+                "payment_reference": po.payment_reference
             }
             for po in purchase_orders[:20]
         ]

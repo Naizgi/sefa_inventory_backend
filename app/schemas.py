@@ -505,7 +505,7 @@ class TicketSummary(BaseModel):
     ticket_utilization_rate: float = 0
 
 
-# ==================== PURCHASE ORDER SCHEMAS (UPDATED WITH VAT) ====================
+# ==================== PURCHASE ORDER SCHEMAS (UPDATED WITH VAT AND BANK ACCOUNT) ====================
 class PurchaseOrderItemBase(BaseModel):
     product_id: int
     quantity_ordered: Decimal = Field(gt=0)
@@ -532,6 +532,11 @@ class PurchaseOrderBase(BaseModel):
     shipping_cost: Decimal = Field(default=0, ge=0)
     discount_amount: Decimal = Field(default=0, ge=0)
     notes: Optional[str] = None
+    
+    # NEW: Bank Account Fields
+    bank_account_id: Optional[int] = Field(None, description="Bank account used for payment")
+    payment_reference: Optional[str] = Field(None, max_length=100, description="Check/Transaction number")
+    payment_date: Optional[date] = Field(None, description="Date of payment")
 
 class PurchaseOrderCreate(PurchaseOrderBase):
     items: List[PurchaseOrderItemCreate]
@@ -540,6 +545,10 @@ class PurchaseOrderUpdate(BaseModel):
     status: Optional[PurchaseStatus] = None
     actual_delivery_date: Optional[date] = None
     notes: Optional[str] = None
+    # NEW: Bank Account Fields for update
+    bank_account_id: Optional[int] = None
+    payment_reference: Optional[str] = None
+    payment_date: Optional[date] = None
 
 class PurchaseOrderResponse(PurchaseOrderBase):
     id: int
@@ -556,6 +565,13 @@ class PurchaseOrderResponse(PurchaseOrderBase):
     created_by: str
     created_at: datetime
     updated_at: Optional[datetime] = None
+    
+    # NEW: Bank Account Fields in response
+    bank_account_id: Optional[int] = None
+    bank_account_name: Optional[str] = None
+    bank_name: Optional[str] = None
+    payment_reference: Optional[str] = None
+    payment_date: Optional[datetime] = None
     
     model_config = ConfigDict(from_attributes=True)
 

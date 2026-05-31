@@ -184,6 +184,7 @@ class BankAccount(Base):
     branch = relationship("Branch", back_populates="bank_accounts")
     sales = relationship("Sale", back_populates="bank_account")
     refunds = relationship("Refund", back_populates="bank_account")
+    purchase_orders = relationship("PurchaseOrder", back_populates="bank_account")  # ← ADD THIS
 
 
 # ==================== STOCK MODEL ====================
@@ -197,8 +198,8 @@ class Stock(Base):
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     quantity = Column(DECIMAL(12, 2), default=0)
-    quantity_with_vat = Column(DECIMAL(12, 2), default=0)  # ← ADD THIS
-    quantity_without_vat = Column(DECIMAL(12, 2), default=0)  # ← ADD THIS
+    quantity_with_vat = Column(DECIMAL(12, 2), default=0)
+    quantity_without_vat = Column(DECIMAL(12, 2), default=0)
     reorder_level = Column(DECIMAL(12, 2), default=0)
     
     # Relationships
@@ -221,9 +222,9 @@ class Sale(Base):
     # Financial fields
     subtotal = Column(DECIMAL(12, 2), nullable=False, default=0)
     tax_amount = Column(DECIMAL(12, 2), default=0)
-    tax_rate = Column(DECIMAL(5, 2), default=15)  # Tax percentage
+    tax_rate = Column(DECIMAL(5, 2), default=15)
     discount_amount = Column(DECIMAL(12, 2), default=0)
-    discount_type = Column(String(20), default="percentage")  # percentage, fixed
+    discount_type = Column(String(20), default="percentage")
     shipping_cost = Column(DECIMAL(12, 2), default=0)
     total_amount = Column(DECIMAL(12, 2), nullable=False)
     total_cost = Column(DECIMAL(12, 2), nullable=False)
@@ -231,7 +232,7 @@ class Sale(Base):
     # Payment fields
     payment_method = Column(String(50), nullable=False, default=PaymentMethod.CASH.value)
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
-    transaction_reference = Column(String(100), nullable=True)  # For transfer reference number
+    transaction_reference = Column(String(100), nullable=True)
     
     # Status fields
     status = Column(String(50), default=SaleStatus.COMPLETED.value)
@@ -284,14 +285,14 @@ class Refund(Base):
     # Refund details
     refund_amount = Column(DECIMAL(12, 2), nullable=False)
     refund_reason = Column(Text, nullable=False)
-    refund_method = Column(String(50), nullable=False)  # cash, transfer, original_method
+    refund_method = Column(String(50), nullable=False)
     
     # Bank transfer details for refund
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
     transaction_reference = Column(String(100), nullable=True)
     
     # Status
-    status = Column(String(50), default="pending")  # pending, approved, completed, rejected
+    status = Column(String(50), default="pending")
     approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
     
@@ -342,9 +343,9 @@ class PurchaseOrder(Base):
     actual_delivery_date = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(50), default=PurchaseStatus.PENDING.value)
     subtotal = Column(DECIMAL(12, 2), default=0)
-    vat_rate = Column(DECIMAL(5, 2), default=15.00)  # ← ADD THIS - Fixed VAT rate (15%)
-    vat_amount = Column(DECIMAL(12, 2), default=0)   # ← ADD THIS - Calculated VAT amount
-    tax_amount = Column(DECIMAL(12, 2), default=0)    # Keep for backward compatibility
+    vat_rate = Column(DECIMAL(5, 2), default=15.00)
+    vat_amount = Column(DECIMAL(12, 2), default=0)
+    tax_amount = Column(DECIMAL(12, 2), default=0)
     shipping_cost = Column(DECIMAL(12, 2), default=0)
     discount_amount = Column(DECIMAL(12, 2), default=0)
     total_amount = Column(DECIMAL(12, 2), default=0)
@@ -353,10 +354,16 @@ class PurchaseOrder(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
+    # NEW: Bank Account Fields
+    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
+    payment_reference = Column(String(100), nullable=True)  # Check/Transaction number
+    payment_date = Column(DateTime(timezone=True), nullable=True)
+    
     # Relationships
     branch = relationship("Branch", back_populates="purchase_orders")
     items = relationship("PurchaseOrderItem", back_populates="purchase_order", cascade="all, delete-orphan")
     creator = relationship("User", foreign_keys=[created_by], back_populates="purchase_orders")
+    bank_account = relationship("BankAccount", back_populates="purchase_orders")  # ← ADD THIS
 
 class PurchaseOrderItem(Base):
     """Individual items in a purchase order"""
@@ -434,9 +441,8 @@ class Loan(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # New field for approval status
-    requires_approval = Column(Boolean, default=True)  # Loans from non-privileged users need approval
-    approval_status = Column(String(50), default="pending")  # pending, approved, rejected
+    requires_approval = Column(Boolean, default=True)
+    approval_status = Column(String(50), default="pending")
     
     # Relationships
     branch = relationship("Branch", back_populates="loans")
@@ -473,7 +479,7 @@ class LoanPayment(Base):
     payment_number = Column(String(50), unique=True, nullable=False, index=True)
     payment_date = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     amount = Column(DECIMAL(12, 2), nullable=False)
-    payment_method = Column(String(50), nullable=False)  # cash, ticket, coupon, mixed
+    payment_method = Column(String(50), nullable=False)
     reference_number = Column(String(100), nullable=True)
     notes = Column(Text, nullable=True)
     recorded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -516,7 +522,7 @@ class StockMovement(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     change_qty = Column(DECIMAL(12, 2), nullable=False)
     movement_type = Column(String(50), nullable=False)
-    with_vat = Column(Boolean, default=True)  # ← ADD THIS - Track if movement was with VAT
+    with_vat = Column(Boolean, default=True)
     reference_id = Column(Integer)
     notes = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -525,10 +531,9 @@ class StockMovement(Base):
     branch = relationship("Branch", back_populates="stock_movements")
     product = relationship("Product", back_populates="stock_movements")
     user = relationship("User", back_populates="stock_movements")
-    
-    
-    
-    # ==================== ALERT MODEL ====================
+
+
+# ==================== ALERT MODEL ====================
 class Alert(Base):
     __tablename__ = "alerts"
     
@@ -552,9 +557,9 @@ class SystemSetting(Base):
     __tablename__ = "system_settings"
     
     id = Column(Integer, primary_key=True, index=True)
-    category = Column(String(50), nullable=False, index=True)  # general, coupon, notification, backup, tax, payment
+    category = Column(String(50), nullable=False, index=True)
     key = Column(String(100), nullable=False)
-    value = Column(Text, nullable=True)  # JSON string value
+    value = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
@@ -583,7 +588,7 @@ class SystemLog(Base):
     __tablename__ = "system_logs"
     
     id = Column(Integer, primary_key=True, index=True)
-    log_type = Column(String(50), nullable=False)  # info, warning, error, backup, settings
+    log_type = Column(String(50), nullable=False)
     message = Column(Text, nullable=False)
     details = Column(Text, nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -625,8 +630,6 @@ class TempItem(Base):
 
 
 # ==================== Add reverse relationships ====================
-
-# Add these after all models are defined to avoid circular references
 Product.purchase_order_items = relationship("PurchaseOrderItem", back_populates="product")
 Product.loan_items = relationship("LoanItem", back_populates="product")
 Product.refund_items = relationship("RefundItem", back_populates="product")
@@ -639,3 +642,4 @@ User.loans_created = relationship("Loan", foreign_keys=[Loan.created_by], back_p
 User.loans_approved = relationship("Loan", foreign_keys=[Loan.approved_by], back_populates="approver")
 User.loan_payments = relationship("LoanPayment", back_populates="recorder")
 User.refunds = relationship("Refund", foreign_keys=[Refund.user_id], back_populates="user")
+# Add bank_account relationship to PurchaseOrder (already added above)
