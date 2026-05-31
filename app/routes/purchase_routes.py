@@ -74,13 +74,16 @@ def create_purchase(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Create a new purchase (legacy)"""
+    """Create a new purchase (legacy) with VAT tracking"""
     
     branch_id = current_user.branch_id
     if not branch_id:
         raise HTTPException(status_code=400, detail="User not assigned to a branch")
     
     total_amount = Decimal('0')
+    
+    # Get VAT status from request (default to False if not specified)
+    has_vat = getattr(purchase_data, 'with_vat', False)
     
     # Create purchase
     purchase = PurchaseModel(
@@ -108,7 +111,7 @@ def create_purchase(
         )
         db.add(purchase_item)
         
-        # Update stock
+        # Update stock with VAT tracking
         stock = db.query(Stock).filter(
             Stock.branch_id == branch_id,
             Stock.product_id == item_data.product_id
@@ -116,16 +119,24 @@ def create_purchase(
         
         if stock:
             stock.quantity += item_data.quantity
+            # Update VAT-specific quantities
+            if has_vat:
+                stock.quantity_with_vat = (stock.quantity_with_vat or 0) + item_data.quantity
+            else:
+                stock.quantity_without_vat = (stock.quantity_without_vat or 0) + item_data.quantity
         else:
             stock = Stock(
                 branch_id=branch_id,
                 product_id=item_data.product_id,
                 quantity=item_data.quantity,
+                quantity_with_vat=item_data.quantity if has_vat else 0,
+                quantity_without_vat=item_data.quantity if not has_vat else 0,
                 reorder_level=0
             )
             db.add(stock)
         
-        # Record stock movement
+        # Record stock movement with VAT info
+        vat_status = "with VAT" if has_vat else "without VAT"
         stock_movement = StockMovement(
             branch_id=branch_id,
             product_id=item_data.product_id,
@@ -133,8 +144,10 @@ def create_purchase(
             change_qty=item_data.quantity,
             movement_type="purchase",
             reference_id=purchase.id,
-            notes=f"Purchase from {purchase_data.supplier_name}"
+            notes=f"Purchase from {purchase_data.supplier_name} - {vat_status}"
         )
+        if hasattr(stock_movement, 'with_vat'):
+            stock_movement.with_vat = has_vat
         db.add(stock_movement)
     
     purchase.total_amount = total_amount
@@ -433,7 +446,7 @@ def receive_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Receive items from purchase order and update inventory"""
+    """Receive items from purchase order and update inventory with VAT tracking"""
     
     purchase_order = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not purchase_order:
@@ -447,6 +460,9 @@ def receive_purchase_order(
         raise HTTPException(status_code=400, detail="User not assigned to a branch")
     
     received_items = []
+    
+    # Determine if this purchase has VAT
+    has_vat = purchase_order.vat_rate and purchase_order.vat_rate > 0
     
     for receive_item in receive_data.items:
         purchase_item = db.query(PurchaseOrderItem).filter(
@@ -475,22 +491,59 @@ def receive_purchase_order(
         
         product = db.query(Product).filter(Product.id == purchase_item.product_id).first()
         
+        # Get existing stock
         stock = db.query(Stock).filter(
             Stock.branch_id == branch_id,
             Stock.product_id == purchase_item.product_id
         ).first()
         
         if stock:
-            stock.quantity += quantity_received
+            # Update stock quantities
+            old_quantity = float(stock.quantity)
+            new_quantity = float(stock.quantity) + float(quantity_received)
+            stock.quantity = Decimal(str(new_quantity))
+            
+            # Update VAT-specific quantities based on purchase order's VAT status
+            if has_vat:
+                # This purchase has VAT - add to with_vat
+                old_with_vat = float(stock.quantity_with_vat) if hasattr(stock, 'quantity_with_vat') and stock.quantity_with_vat else 0
+                new_with_vat = old_with_vat + float(quantity_received)
+                stock.quantity_with_vat = Decimal(str(new_with_vat))
+                # Keep without_vat unchanged
+            else:
+                # This purchase has NO VAT - add to without_vat
+                old_without_vat = float(stock.quantity_without_vat) if hasattr(stock, 'quantity_without_vat') and stock.quantity_without_vat else 0
+                new_without_vat = old_without_vat + float(quantity_received)
+                stock.quantity_without_vat = Decimal(str(new_without_vat))
+                # Keep with_vat unchanged
+            
+            # Ensure the fields exist (migration for old records)
+            if hasattr(stock, 'quantity_with_vat') and stock.quantity_with_vat is None:
+                stock.quantity_with_vat = 0
+            if hasattr(stock, 'quantity_without_vat') and stock.quantity_without_vat is None:
+                stock.quantity_without_vat = 0
+                
         else:
+            # Create new stock record
+            if has_vat:
+                new_with_vat = quantity_received
+                new_without_vat = 0
+            else:
+                new_with_vat = 0
+                new_without_vat = quantity_received
+            
             stock = Stock(
                 branch_id=branch_id,
                 product_id=purchase_item.product_id,
                 quantity=quantity_received,
+                quantity_with_vat=new_with_vat,
+                quantity_without_vat=new_without_vat,
                 reorder_level=0
             )
             db.add(stock)
         
+        # Record stock movement with VAT info
+        vat_status = "with VAT" if has_vat else "without VAT"
         stock_movement = StockMovement(
             branch_id=branch_id,
             product_id=purchase_item.product_id,
@@ -498,8 +551,11 @@ def receive_purchase_order(
             change_qty=quantity_received,
             movement_type="purchase",
             reference_id=purchase_order.id,
-            notes=f"Received from PO: {purchase_order.order_number}"
+            notes=f"Received from PO: {purchase_order.order_number} - {vat_status}"
         )
+        # Add with_vat attribute if it exists
+        if hasattr(stock_movement, 'with_vat'):
+            stock_movement.with_vat = has_vat
         db.add(stock_movement)
         
         received_items.append({
@@ -508,7 +564,8 @@ def receive_purchase_order(
             "quantity_received": float(quantity_received),
             "unit_cost": float(purchase_item.unit_cost),
             "total_cost": float(purchase_item.unit_cost * quantity_received),
-            "branch_id": branch_id
+            "branch_id": branch_id,
+            "with_vat": has_vat
         })
     
     all_items_received = all(
@@ -528,6 +585,7 @@ def receive_purchase_order(
         "status": purchase_order.status,
         "order_number": purchase_order.order_number,
         "branch_id": branch_id,
+        "has_vat": has_vat,
         "received_items": received_items,
         "total_items_received": len(received_items)
     }
