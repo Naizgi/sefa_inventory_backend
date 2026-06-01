@@ -11,8 +11,9 @@ from .dashboard import router as dashboard_router
 from .loan_routes import router as loan_router
 from .temp_items_routes import router as temp_items_router
 from .settings_router import router as settings_router
-from .vat import router as vat_router  # NEW: VAT tracking router
-from .damaged_goods import router as damaged_goods_router  # Add if you have this
+from .vat import router as vat_router  # VAT tracking router
+# Remove or comment out the damaged_goods import if it doesn't exist
+# from .damaged_goods import router as damaged_goods_router
 
 
 # Export all routers
@@ -30,6 +31,6 @@ __all__ = [
     'loan_router',
     'temp_items_router',
     'settings_router',
-    'vat_router',  # NEW: Export VAT router
-    'damaged_goods_router',  # Optional: if you have damaged goods router
+    'vat_router',  # VAT router
+    # 'damaged_goods_router',  # Remove if the file doesn't exist
 ]

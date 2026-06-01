@@ -14,8 +14,8 @@ from app.schemas import (
     DamagedGoodsCreate, DamagedGoodsUpdate, DamagedGoodsResponse, 
     DamagedGoodsApprove
 )
-from app.utils.dependencies import get_current_user
-from app.utils.permissions import require_privileged
+# FIXED: Import both from dependencies
+from app.utils.dependencies import get_current_user, require_privileged
 
 router = APIRouter(prefix="/api/damaged-goods", tags=["Damaged Goods"])
 
@@ -192,6 +192,105 @@ def get_damaged_reports(
     return result
 
 
+# Get single damaged goods report
+@router.get("/reports/{report_id}", response_model=DamagedGoodsResponse)
+def get_damaged_report(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_privileged)
+):
+    """Get a single damaged goods report by ID"""
+    
+    report = db.query(DamagedGoods).filter(DamagedGoods.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Damaged goods report not found")
+    
+    # Check branch access
+    if not current_user.is_admin() and report.branch_id != current_user.branch_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    branch = db.query(Branch).filter(Branch.id == report.branch_id).first()
+    product = db.query(Product).filter(Product.id == report.product_id).first()
+    reporter = db.query(User).filter(User.id == report.reported_by).first()
+    processor = db.query(User).filter(User.id == report.processed_by).first() if report.processed_by else None
+    
+    return {
+        "id": report.id,
+        "report_number": report.report_number,
+        "branch_id": report.branch_id,
+        "branch_name": branch.name if branch else None,
+        "product_id": report.product_id,
+        "product_name": product.name if product else None,
+        "product_sku": product.sku if product else None,
+        "quantity": float(report.quantity),
+        "reason": report.reason,
+        "notes": report.notes,
+        "reported_by": reporter.name if reporter else "System",
+        "reported_at": report.reported_at,
+        "status": report.status,
+        "approved_by": None,
+        "approved_at": None,
+        "processed_by": processor.name if processor else None,
+        "processed_at": report.processed_at,
+        "created_at": report.created_at,
+        "updated_at": report.updated_at
+    }
+
+
+# Update damaged goods report (Admin only)
+@router.put("/reports/{report_id}", response_model=DamagedGoodsResponse)
+def update_damaged_report(
+    report_id: int,
+    update_data: DamagedGoodsUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_privileged)
+):
+    """Update a damaged goods report (Admin only)"""
+    
+    report = db.query(DamagedGoods).filter(DamagedGoods.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Damaged goods report not found")
+    
+    # Only admin can update
+    if not current_user.is_admin():
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    if update_data.status:
+        report.status = update_data.status
+    if update_data.notes:
+        report.notes = update_data.notes
+    
+    report.updated_at = datetime.now()
+    db.commit()
+    db.refresh(report)
+    
+    branch = db.query(Branch).filter(Branch.id == report.branch_id).first()
+    product = db.query(Product).filter(Product.id == report.product_id).first()
+    reporter = db.query(User).filter(User.id == report.reported_by).first()
+    
+    return {
+        "id": report.id,
+        "report_number": report.report_number,
+        "branch_id": report.branch_id,
+        "branch_name": branch.name if branch else None,
+        "product_id": report.product_id,
+        "product_name": product.name if product else None,
+        "product_sku": product.sku if product else None,
+        "quantity": float(report.quantity),
+        "reason": report.reason,
+        "notes": report.notes,
+        "reported_by": reporter.name if reporter else "System",
+        "reported_at": report.reported_at,
+        "status": report.status,
+        "approved_by": None,
+        "approved_at": None,
+        "processed_by": None,
+        "processed_at": None,
+        "created_at": report.created_at,
+        "updated_at": report.updated_at
+    }
+
+
 # Get damaged goods summary/stats
 @router.get("/summary/stats")
 def get_damaged_summary(
@@ -261,3 +360,27 @@ def get_damaged_summary(
             for p in top_products
         ]
     }
+
+
+# Delete damaged goods report (Admin only)
+@router.delete("/reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_damaged_report(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_privileged)
+):
+    """Delete a damaged goods report (Admin only)"""
+    
+    # Only admin can delete
+    if not current_user.is_admin():
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    report = db.query(DamagedGoods).filter(DamagedGoods.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Damaged goods report not found")
+    
+    # Note: This does NOT restore the stock
+    db.delete(report)
+    db.commit()
+    
+    return None
