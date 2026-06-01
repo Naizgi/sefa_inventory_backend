@@ -1,8 +1,8 @@
-import enum
-from sqlalchemy import Column, Integer, String, Text, Float, Boolean, DateTime, ForeignKey, DECIMAL, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, Float, Boolean, DateTime, ForeignKey, DECIMAL, UniqueConstraint, Index
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.database import Base
+import enum
 
 # ==================== ENUMS ====================
 class UserRole(str, enum.Enum):
