@@ -23,7 +23,7 @@ from app.routes import (
     loan_router, products_router, purchase_router, reports_router,
     sales_router, stock_router, temp_items_router, users_router
 )
-from app.routers.vat import router as vat_router  # NEW: Import VAT router
+from app.routes.vat import router as vat_router # NEW: Import VAT router
 
 # ==================== SCHEDULER ====================
 scheduler = BackgroundScheduler()
