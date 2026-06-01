@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from datetime import datetime, date
 from typing import Optional, List, Any
 from decimal import Decimal
+from app.models import DamagedGoodsStatus
 
 # ==================== ENUMS ====================
 class PurchaseStatus(str, Enum):
@@ -50,6 +51,14 @@ class RefundStatus(str, Enum):
 class DiscountType(str, Enum):
     PERCENTAGE = "percentage"
     FIXED = "fixed"
+    
+    
+    # Add this near the top of schemas.py with other enums
+class DamagedGoodsStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PROCESSED = "processed"
 
 # ==================== BRANCH SCHEMAS ====================
 class BranchBase(BaseModel):
