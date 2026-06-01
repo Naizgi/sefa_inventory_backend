@@ -8,7 +8,7 @@ import enum
 class UserRole(str, enum.Enum):
     ADMIN = "admin"
     SALESMAN = "salesman"
-    PRIVILEGED_SALES = "privileged_sales"  # New role for privileged sales users
+    PRIVILEGED_SALES = "privileged_sales"
 
 class PurchaseStatus(str, enum.Enum):
     PENDING = "pending"
@@ -75,6 +75,10 @@ class Branch(Base):
     alerts = relationship("Alert", back_populates="branch")
     loans = relationship("Loan", back_populates="branch", cascade="all, delete-orphan")
     bank_accounts = relationship("BankAccount", back_populates="branch", cascade="all, delete-orphan")
+    damaged_goods = relationship("DamagedGoods", back_populates="branch", cascade="all, delete-orphan")
+    vat_purchases = relationship("VATPurchase", back_populates="branch", cascade="all, delete-orphan")
+    vat_sales = relationship("VATSale", back_populates="branch", cascade="all, delete-orphan")
+    vat_summaries = relationship("VATSummary", back_populates="branch", cascade="all, delete-orphan")
 
 
 # ==================== PRODUCT MODEL ====================
@@ -102,9 +106,12 @@ class Product(Base):
     alerts = relationship("Alert", back_populates="product")
     loan_items = relationship("LoanItem", back_populates="product")
     refund_items = relationship("RefundItem", back_populates="product")
+    damaged_goods_reports = relationship("DamagedGoods", back_populates="product", cascade="all, delete-orphan")
+    vat_purchases = relationship("VATPurchase", back_populates="product", cascade="all, delete-orphan")
+    vat_sales = relationship("VATSale", back_populates="product", cascade="all, delete-orphan")
 
 
-# ==================== USER MODEL (UPDATED WITH PRIVILEGES) ====================
+# ==================== USER MODEL ====================
 class User(Base):
     __tablename__ = "users"
     
@@ -112,7 +119,7 @@ class User(Base):
     name = Column(String(255), nullable=False)
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(50), nullable=False)  # admin, salesman, or privileged_sales
+    role = Column(String(50), nullable=False)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=True)
     active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -120,47 +127,50 @@ class User(Base):
     # Relationships
     branch = relationship("Branch", back_populates="users")
     sales = relationship("Sale", back_populates="user")
-    refunds = relationship("Refund", back_populates="user")
+    refunds = relationship("Refund", foreign_keys="Refund.user_id", back_populates="user")
     stock_movements = relationship("StockMovement", back_populates="user")
     purchase_orders = relationship("PurchaseOrder", back_populates="creator")
     loans_created = relationship("Loan", foreign_keys="Loan.created_by", back_populates="creator")
     loans_approved = relationship("Loan", foreign_keys="Loan.approved_by", back_populates="approver")
     loan_payments = relationship("LoanPayment", back_populates="recorder")
     
-    # Helper methods for permissions
+    # Damaged goods relationships
+    damaged_goods_reported = relationship("DamagedGoods", foreign_keys="DamagedGoods.reported_by", back_populates="reporter")
+    damaged_goods_approved = relationship("DamagedGoods", foreign_keys="DamagedGoods.approved_by", back_populates="approver")
+    damaged_goods_processed = relationship("DamagedGoods", foreign_keys="DamagedGoods.processed_by", back_populates="processor")
+    
+    # VAT relationships
+    vat_purchases_created = relationship("VATPurchase", foreign_keys="VATPurchase.created_by", back_populates="creator")
+    vat_sales_created = relationship("VATSale", foreign_keys="VATSale.created_by", back_populates="creator")
+    vat_summaries_created = relationship("VATSummary", foreign_keys="VATSummary.created_by", back_populates="creator")
+    vat_rates_created = relationship("VATRateHistory", foreign_keys="VATRateHistory.created_by", back_populates="creator")
+    
+    # Helper methods
     def is_admin(self) -> bool:
         return self.role == UserRole.ADMIN.value
     
     def is_privileged(self) -> bool:
-        """Check if user has privileged access (admin or privileged_sales)"""
         return self.role in [UserRole.ADMIN.value, UserRole.PRIVILEGED_SALES.value]
     
     def can_create_loans(self) -> bool:
-        """Only admin and privileged sales can create loans"""
         return self.is_privileged()
     
     def can_approve_loans(self) -> bool:
-        """Only admin can approve loans"""
         return self.is_admin()
     
     def can_process_refunds(self) -> bool:
-        """Only admin and privileged sales can process refunds"""
         return self.is_privileged()
     
     def can_manage_users(self) -> bool:
-        """Only admin can manage users"""
         return self.is_admin()
     
     def can_manage_branches(self) -> bool:
-        """Only admin can manage branches"""
         return self.is_admin()
     
     def can_view_reports(self) -> bool:
-        """All authenticated users can view basic reports"""
         return True
     
     def can_export_data(self) -> bool:
-        """Only admin can export all data"""
         return self.is_admin()
 
 
@@ -173,7 +183,7 @@ class BankAccount(Base):
     bank_name = Column(String(100), nullable=False)
     account_number = Column(String(50), nullable=False)
     account_name = Column(String(255), nullable=False)
-    account_type = Column(String(50), default="checking")  # checking, savings, business
+    account_type = Column(String(50), default="checking")
     currency = Column(String(3), default="ETB")
     is_active = Column(Boolean, default=True)
     notes = Column(Text, nullable=True)
@@ -184,7 +194,7 @@ class BankAccount(Base):
     branch = relationship("Branch", back_populates="bank_accounts")
     sales = relationship("Sale", back_populates="bank_account")
     refunds = relationship("Refund", back_populates="bank_account")
-    purchase_orders = relationship("PurchaseOrder", back_populates="bank_account")  # ← ADD THIS
+    purchase_orders = relationship("PurchaseOrder", back_populates="bank_account")
 
 
 # ==================== STOCK MODEL ====================
@@ -207,7 +217,7 @@ class Stock(Base):
     product = relationship("Product", back_populates="stock")
 
 
-# ==================== SALE MODELS (ENHANCED) ====================
+# ==================== SALE MODELS ====================
 class Sale(Base):
     __tablename__ = "sales"
     
@@ -219,7 +229,6 @@ class Sale(Base):
     customer_phone = Column(String(50))
     customer_email = Column(String(255))
     
-    # Financial fields
     subtotal = Column(DECIMAL(12, 2), nullable=False, default=0)
     tax_amount = Column(DECIMAL(12, 2), default=0)
     tax_rate = Column(DECIMAL(5, 2), default=15)
@@ -229,17 +238,14 @@ class Sale(Base):
     total_amount = Column(DECIMAL(12, 2), nullable=False)
     total_cost = Column(DECIMAL(12, 2), nullable=False)
     
-    # Payment fields
     payment_method = Column(String(50), nullable=False, default=PaymentMethod.CASH.value)
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
     transaction_reference = Column(String(100), nullable=True)
     
-    # Status fields
     status = Column(String(50), default=SaleStatus.COMPLETED.value)
     refund_amount = Column(DECIMAL(12, 2), default=0)
     refund_status = Column(String(50), default=RefundStatus.NONE.value)
     
-    # Additional fields
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -251,6 +257,7 @@ class Sale(Base):
     items = relationship("SaleItem", back_populates="sale", cascade="all, delete-orphan")
     refunds = relationship("Refund", back_populates="original_sale", cascade="all, delete-orphan")
     loan_payments = relationship("LoanPayment", back_populates="sale")
+    vat_sales = relationship("VATSale", back_populates="sale", cascade="all, delete-orphan")
 
 
 class SaleItem(Base):
@@ -269,6 +276,7 @@ class SaleItem(Base):
     product = relationship("Product", back_populates="sale_items")
     loan_items = relationship("LoanItem", back_populates="sale_item")
     refund_items = relationship("RefundItem", back_populates="sale_item")
+    vat_sale = relationship("VATSale", back_populates="sale_item", uselist=False)
 
 
 # ==================== REFUND MODELS ====================
@@ -282,21 +290,17 @@ class Refund(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     customer_name = Column(String(255))
     
-    # Refund details
     refund_amount = Column(DECIMAL(12, 2), nullable=False)
     refund_reason = Column(Text, nullable=False)
     refund_method = Column(String(50), nullable=False)
     
-    # Bank transfer details for refund
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
     transaction_reference = Column(String(100), nullable=True)
     
-    # Status
     status = Column(String(50), default="pending")
     approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
     
-    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
     notes = Column(Text, nullable=True)
@@ -329,9 +333,7 @@ class RefundItem(Base):
 
 
 # ==================== PURCHASE MODELS ====================
-
 class PurchaseOrder(Base):
-    """Main purchase order table - tracks bulk purchases"""
     __tablename__ = "purchase_orders"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -354,19 +356,19 @@ class PurchaseOrder(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # NEW: Bank Account Fields
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
-    payment_reference = Column(String(100), nullable=True)  # Check/Transaction number
+    payment_reference = Column(String(100), nullable=True)
     payment_date = Column(DateTime(timezone=True), nullable=True)
     
     # Relationships
     branch = relationship("Branch", back_populates="purchase_orders")
     items = relationship("PurchaseOrderItem", back_populates="purchase_order", cascade="all, delete-orphan")
     creator = relationship("User", foreign_keys=[created_by], back_populates="purchase_orders")
-    bank_account = relationship("BankAccount", back_populates="purchase_orders")  # ← ADD THIS
+    bank_account = relationship("BankAccount", back_populates="purchase_orders")
+    vat_purchases = relationship("VATPurchase", back_populates="purchase_order", cascade="all, delete-orphan")
+
 
 class PurchaseOrderItem(Base):
-    """Individual items in a purchase order"""
     __tablename__ = "purchase_order_items"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -414,10 +416,8 @@ class PurchaseItem(Base):
     product = relationship("Product", back_populates="purchase_items")
 
 
-# ==================== LOAN SYSTEM MODELS (UPDATED WITH APPROVAL FLOW) ====================
-
+# ==================== LOAN MODELS ====================
 class Loan(Base):
-    """Track loans given to customers"""
     __tablename__ = "loans"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -453,7 +453,6 @@ class Loan(Base):
 
 
 class LoanItem(Base):
-    """Items included in a loan"""
     __tablename__ = "loan_items"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -471,7 +470,6 @@ class LoanItem(Base):
 
 
 class LoanPayment(Base):
-    """Track loan payments/settlements"""
     __tablename__ = "loan_payments"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -493,7 +491,6 @@ class LoanPayment(Base):
 
 
 class LoanSummary(Base):
-    """Daily loan summary for reporting"""
     __tablename__ = "loan_summaries"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -551,9 +548,7 @@ class Alert(Base):
 
 
 # ==================== SETTINGS MODELS ====================
-
 class SystemSetting(Base):
-    """Store system-wide settings"""
     __tablename__ = "system_settings"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -569,7 +564,6 @@ class SystemSetting(Base):
 
 
 class BackupRecord(Base):
-    """Track database backups"""
     __tablename__ = "backup_records"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -584,7 +578,6 @@ class BackupRecord(Base):
 
 
 class SystemLog(Base):
-    """Track system activities and errors"""
     __tablename__ = "system_logs"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -599,10 +592,6 @@ class SystemLog(Base):
     user = relationship("User", foreign_keys=[user_id])
 
 
-
-
-
-
 # ==================== DAMAGED GOODS MODEL ====================
 class DamagedGoodsStatus(str, enum.Enum):
     PENDING = "pending"
@@ -611,7 +600,6 @@ class DamagedGoodsStatus(str, enum.Enum):
     PROCESSED = "processed"
 
 class DamagedGoods(Base):
-    """Track damaged goods reported by sales staff"""
     __tablename__ = "damaged_goods"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -632,24 +620,17 @@ class DamagedGoods(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     # Relationships
-    branch = relationship("Branch", foreign_keys=[branch_id])
-    product = relationship("Product")
-    reporter = relationship("User", foreign_keys=[reported_by])
-    approver = relationship("User", foreign_keys=[approved_by])
-    processor = relationship("User", foreign_keys=[processed_by])
+    branch = relationship("Branch", foreign_keys=[branch_id], back_populates="damaged_goods")
+    product = relationship("Product", foreign_keys=[product_id], back_populates="damaged_goods_reports")
+    reporter = relationship("User", foreign_keys=[reported_by], back_populates="damaged_goods_reported")
+    approver = relationship("User", foreign_keys=[approved_by], back_populates="damaged_goods_approved")
+    processor = relationship("User", foreign_keys=[processed_by], back_populates="damaged_goods_processed")
 
     __table_args__ = (
         Index('idx_damaged_branch', 'branch_id'),
         Index('idx_damaged_status', 'status'),
         Index('idx_damaged_date', 'reported_at'),
     )
-
-
-
-
-
-
-
 
 
 # ==================== TEMP ITEM MODEL ====================
@@ -659,7 +640,6 @@ class TempItemStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 class TempItem(Base):
-    """Temporary item registration for salesmen"""
     __tablename__ = "temp_items"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -681,8 +661,8 @@ class TempItem(Base):
     registrar = relationship("User", foreign_keys=[registered_by])
     receiver = relationship("User", foreign_keys=[received_by])
 
-# ==================== VAT TRACKING MODELS ====================
 
+# ==================== VAT TRACKING MODELS ====================
 class VATTransactionType(str, enum.Enum):
     PURCHASE = "purchase"
     SALE = "sale"
@@ -694,7 +674,6 @@ class VATStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 class VATPurchase(Base):
-    """Track VAT on purchases - detailed stock valuation with product grouping"""
     __tablename__ = "vat_purchases"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -702,56 +681,47 @@ class VATPurchase(Base):
     purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     
-    # Product information
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     product_name = Column(String(255), nullable=False)
-    product_group = Column(String(100), nullable=True)  # Product category/group
+    product_group = Column(String(100), nullable=True)
     sku = Column(String(100), nullable=False)
     
-    # Quantity and cost
     quantity = Column(DECIMAL(12, 2), nullable=False)
-    unit_cost = Column(DECIMAL(12, 2), nullable=False)  # Cost price per unit (excl VAT)
-    total_cost = Column(DECIMAL(12, 2), nullable=False)  # Quantity × Unit cost
+    unit_cost = Column(DECIMAL(12, 2), nullable=False)
+    total_cost = Column(DECIMAL(12, 2), nullable=False)
     
-    # VAT calculations
-    vat_rate = Column(DECIMAL(5, 2), default=15.00)  # VAT rate percentage
-    vat_amount = Column(DECIMAL(12, 2), nullable=False)  # Total cost × VAT rate
-    total_with_vat = Column(DECIMAL(12, 2), nullable=False)  # Total cost + VAT
+    vat_rate = Column(DECIMAL(5, 2), default=15.00)
+    vat_amount = Column(DECIMAL(12, 2), nullable=False)
+    total_with_vat = Column(DECIMAL(12, 2), nullable=False)
     
-    # Selling price calculation (cost / 0.85 to get 15% margin + VAT)
-    calculated_selling_price = Column(DECIMAL(12, 2), nullable=True)  # (unit_cost / 0.85) for 15% markup
-    calculated_selling_price_with_vat = Column(DECIMAL(12, 2), nullable=True)  # Selling price + VAT
+    calculated_selling_price = Column(DECIMAL(12, 2), nullable=True)
+    calculated_selling_price_with_vat = Column(DECIMAL(12, 2), nullable=True)
     
-    # Current stock tracking from this purchase batch
-    current_stock = Column(DECIMAL(12, 2), default=0)  # Remaining stock from this purchase
-    sold_quantity = Column(DECIMAL(12, 2), default=0)  # Quantity sold
-    sold_value = Column(DECIMAL(12, 2), default=0)  # Total value of sold items (excl VAT)
-    sold_vat = Column(DECIMAL(12, 2), default=0)  # VAT from sold items
-    current_value = Column(DECIMAL(12, 2), default=0)  # Value of remaining stock (excl VAT)
-    current_vat = Column(DECIMAL(12, 2), default=0)  # VAT on remaining stock
+    current_stock = Column(DECIMAL(12, 2), default=0)
+    sold_quantity = Column(DECIMAL(12, 2), default=0)
+    sold_value = Column(DECIMAL(12, 2), default=0)
+    sold_vat = Column(DECIMAL(12, 2), default=0)
+    current_value = Column(DECIMAL(12, 2), default=0)
+    current_vat = Column(DECIMAL(12, 2), default=0)
     
-    # Supplier information
     supplier_name = Column(String(255), nullable=True)
     invoice_number = Column(String(100), nullable=True)
     purchase_date = Column(DateTime(timezone=True), nullable=False)
     
-    # Status
     status = Column(String(50), default=VATStatus.PENDING.value)
     notes = Column(Text, nullable=True)
     
-    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     # Relationships
-    branch = relationship("Branch", foreign_keys=[branch_id])
-    product = relationship("Product", foreign_keys=[product_id])
-    creator = relationship("User", foreign_keys=[created_by])
-    purchase_order = relationship("PurchaseOrder", foreign_keys=[purchase_order_id])
+    branch = relationship("Branch", foreign_keys=[branch_id], back_populates="vat_purchases")
+    product = relationship("Product", foreign_keys=[product_id], back_populates="vat_purchases")
+    creator = relationship("User", foreign_keys=[created_by], back_populates="vat_purchases_created")
+    purchase_order = relationship("PurchaseOrder", foreign_keys=[purchase_order_id], back_populates="vat_purchases")
     vat_sales = relationship("VATSale", back_populates="vat_purchase", cascade="all, delete-orphan")
     
-    # Indexes
     __table_args__ = (
         Index('idx_vat_purchase_branch', 'branch_id'),
         Index('idx_vat_purchase_product', 'product_id'),
@@ -762,7 +732,6 @@ class VATPurchase(Base):
 
 
 class VATSale(Base):
-    """Track VAT on sales - linking sales to original purchase batches"""
     __tablename__ = "vat_sales"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -772,47 +741,40 @@ class VATSale(Base):
     vat_purchase_id = Column(Integer, ForeignKey("vat_purchases.id"), nullable=False)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     
-    # Product information
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     product_name = Column(String(255), nullable=False)
     product_group = Column(String(100), nullable=True)
     sku = Column(String(100), nullable=False)
     
-    # Quantity and pricing
     quantity = Column(DECIMAL(12, 2), nullable=False)
-    unit_cost = Column(DECIMAL(12, 2), nullable=False)  # Original cost from purchase (excl VAT)
-    selling_price = Column(DECIMAL(12, 2), nullable=False)  # Selling price per unit (excl VAT)
-    selling_price_with_vat = Column(DECIMAL(12, 2), nullable=False)  # Selling price + VAT
+    unit_cost = Column(DECIMAL(12, 2), nullable=False)
+    selling_price = Column(DECIMAL(12, 2), nullable=False)
+    selling_price_with_vat = Column(DECIMAL(12, 2), nullable=False)
     
-    # VAT calculations
     vat_rate = Column(DECIMAL(5, 2), default=15.00)
-    vat_amount = Column(DECIMAL(12, 2), nullable=False)  # Quantity × selling_price × vat_rate / 100
-    total_amount = Column(DECIMAL(12, 2), nullable=False)  # Quantity × selling_price (excl VAT)
-    total_amount_with_vat = Column(DECIMAL(12, 2), nullable=False)  # Total amount + VAT
+    vat_amount = Column(DECIMAL(12, 2), nullable=False)
+    total_amount = Column(DECIMAL(12, 2), nullable=False)
+    total_amount_with_vat = Column(DECIMAL(12, 2), nullable=False)
     
-    # Profit tracking
-    cost_of_goods_sold = Column(DECIMAL(12, 2), nullable=False)  # Quantity × unit_cost
-    profit = Column(DECIMAL(12, 2), nullable=False)  # Total amount - cost_of_goods_sold
-    profit_margin = Column(DECIMAL(5, 2), nullable=False)  # (Profit / Total amount) × 100
+    cost_of_goods_sold = Column(DECIMAL(12, 2), nullable=False)
+    profit = Column(DECIMAL(12, 2), nullable=False)
+    profit_margin = Column(DECIMAL(5, 2), nullable=False)
     
-    # Customer information
     customer_name = Column(String(255), nullable=True)
     invoice_number = Column(String(50), nullable=True)
     sale_date = Column(DateTime(timezone=True), nullable=False)
     
-    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     # Relationships
-    sale = relationship("Sale", foreign_keys=[sale_id])
-    sale_item = relationship("SaleItem", foreign_keys=[sale_item_id])
-    vat_purchase = relationship("VATPurchase", back_populates="vat_sales")
-    product = relationship("Product", foreign_keys=[product_id])
-    branch = relationship("Branch", foreign_keys=[branch_id])
-    creator = relationship("User", foreign_keys=[created_by])
+    sale = relationship("Sale", foreign_keys=[sale_id], back_populates="vat_sales")
+    sale_item = relationship("SaleItem", foreign_keys=[sale_item_id], back_populates="vat_sale")
+    vat_purchase = relationship("VATPurchase", foreign_keys=[vat_purchase_id], back_populates="vat_sales")
+    product = relationship("Product", foreign_keys=[product_id], back_populates="vat_sales")
+    branch = relationship("Branch", foreign_keys=[branch_id], back_populates="vat_sales")
+    creator = relationship("User", foreign_keys=[created_by], back_populates="vat_sales_created")
     
-    # Indexes
     __table_args__ = (
         Index('idx_vat_sale_branch', 'branch_id'),
         Index('idx_vat_sale_product', 'product_id'),
@@ -823,59 +785,47 @@ class VATSale(Base):
 
 
 class VATSummary(Base):
-    """Monthly VAT summary for reporting"""
     __tablename__ = "vat_summaries"
     
     id = Column(Integer, primary_key=True, index=True)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
-    summary_month = Column(String(7), nullable=False)  # Format: YYYY-MM
+    summary_month = Column(String(7), nullable=False)
     summary_year = Column(Integer, nullable=False)
-    summary_month_num = Column(Integer, nullable=False)  # 1-12
+    summary_month_num = Column(Integer, nullable=False)
     
-    # Purchase totals
     total_purchases_excl_vat = Column(DECIMAL(12, 2), default=0)
     total_purchase_vat = Column(DECIMAL(12, 2), default=0)
     total_purchases_incl_vat = Column(DECIMAL(12, 2), default=0)
     purchase_count = Column(Integer, default=0)
+    purchase_by_group = Column(Text, nullable=True)
     
-    # Purchase by product group
-    purchase_by_group = Column(Text, nullable=True)  # JSON string of group breakdown
-    
-    # Sale totals
     total_sales_excl_vat = Column(DECIMAL(12, 2), default=0)
     total_sale_vat = Column(DECIMAL(12, 2), default=0)
     total_sales_incl_vat = Column(DECIMAL(12, 2), default=0)
     sale_count = Column(Integer, default=0)
+    sale_by_group = Column(Text, nullable=True)
     
-    # Sale by product group
-    sale_by_group = Column(Text, nullable=True)  # JSON string of group breakdown
-    
-    # VAT payable/receivable (Sale VAT - Purchase VAT)
     vat_payable = Column(DECIMAL(12, 2), default=0)
-    vat_receivable = Column(DECIMAL(12, 2), default=0)  # If purchase VAT > sale VAT
-    net_vat = Column(DECIMAL(12, 2), default=0)  # Positive = payable, Negative = receivable
+    vat_receivable = Column(DECIMAL(12, 2), default=0)
+    net_vat = Column(DECIMAL(12, 2), default=0)
     
-    # Profit summary
-    total_profit_excl_vat = Column(DECIMAL(12, 2), default=0)  # Sales - COGS
+    total_profit_excl_vat = Column(DECIMAL(12, 2), default=0)
     average_profit_margin = Column(DECIMAL(5, 2), default=0)
     
-    # Status
     status = Column(String(50), default=VATStatus.PENDING.value)
     filed_date = Column(DateTime(timezone=True), nullable=True)
     payment_date = Column(DateTime(timezone=True), nullable=True)
     payment_reference = Column(String(100), nullable=True)
     notes = Column(Text, nullable=True)
     
-    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     # Relationships
-    branch = relationship("Branch", foreign_keys=[branch_id])
-    creator = relationship("User", foreign_keys=[created_by])
+    branch = relationship("Branch", foreign_keys=[branch_id], back_populates="vat_summaries")
+    creator = relationship("User", foreign_keys=[created_by], back_populates="vat_summaries_created")
     
-    # Indexes
     __table_args__ = (
         UniqueConstraint('branch_id', 'summary_month', name='unique_branch_month'),
         Index('idx_vat_summary_month', 'summary_month'),
@@ -884,7 +834,6 @@ class VATSummary(Base):
 
 
 class VATRateHistory(Base):
-    """Track VAT rate changes over time"""
     __tablename__ = "vat_rate_histories"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -896,25 +845,8 @@ class VATRateHistory(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
-    creator = relationship("User", foreign_keys=[created_by])
+    creator = relationship("User", foreign_keys=[created_by], back_populates="vat_rates_created")
     
-    # Indexes
     __table_args__ = (
         Index('idx_vat_rate_effective', 'effective_from', 'effective_to'),
     )
-
-
-# ==================== Update Reverse Relationships for VAT ====================
-Product.vat_purchases = relationship("VATPurchase", back_populates="product", cascade="all, delete-orphan")
-Product.vat_sales = relationship("VATSale", back_populates="product", cascade="all, delete-orphan")
-Branch.vat_purchases = relationship("VATPurchase", back_populates="branch", cascade="all, delete-orphan")
-Branch.vat_sales = relationship("VATSale", back_populates="branch", cascade="all, delete-orphan")
-Branch.vat_summaries = relationship("VATSummary", back_populates="branch", cascade="all, delete-orphan")
-PurchaseOrder.vat_purchases = relationship("VATPurchase", back_populates="purchase_order", cascade="all, delete-orphan")
-Sale.vat_sales = relationship("VATSale", back_populates="sale", cascade="all, delete-orphan")
-SaleItem.vat_sale = relationship("VATSale", back_populates="sale_item", uselist=False)
-
-User.vat_purchases_created = relationship("VATPurchase", foreign_keys=[VATPurchase.created_by], back_populates="creator")
-User.vat_sales_created = relationship("VATSale", foreign_keys=[VATSale.created_by], back_populates="creator")
-User.vat_summaries_created = relationship("VATSummary", foreign_keys=[VATSummary.created_by], back_populates="creator")
-User.vat_rates_created = relationship("VATRateHistory", foreign_keys=[VATRateHistory.created_by], back_populates="creator")
