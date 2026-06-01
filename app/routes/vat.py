@@ -12,8 +12,8 @@ from app.models import (
     Sale, SaleItem, VATPurchase, VATSale, VATSummary, VATRateHistory,
     VATStatus, Stock, StockMovement
 )
-# Fix: Correct import path for vat_schemas
-from app.schemas.vat_schemas import (
+# FIXED: Import from app.schemas directly (not app.schemas.vat_schemas)
+from app.schemas import (
     VATPurchaseCreate, VATPurchaseUpdate, VATPurchaseResponse,
     VATSaleCreate, VATSaleResponse, VATPurchaseStockResponse,
     VATSummaryCreate, VATSummaryUpdate, VATSummaryResponse,
@@ -111,9 +111,6 @@ def create_vat_purchase(
     db.add(vat_purchase)
     db.commit()
     db.refresh(vat_purchase)
-    
-    # Update product cost? (Optional - to maintain average cost)
-    # This can be configured in settings
     
     # Record stock movement
     stock_movement = StockMovement(
@@ -898,7 +895,7 @@ def get_vat_dashboard(
     # Rate history
     rate_history = db.query(VATRateHistory).order_by(VATRateHistory.effective_from.desc()).limit(5).all()
     
-    # Top product groups - call the function directly (removed await)
+    # Top product groups
     top_groups = get_vat_product_group_report(db=db, current_user=current_user)
     
     return VATDashboardSummary(
