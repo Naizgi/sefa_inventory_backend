@@ -3,7 +3,8 @@ from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from datetime import datetime, date
 from typing import Optional, List, Any
 from decimal import Decimal
-from app.models import DamagedGoodsStatus
+# Remove this import - we'll define it in schemas instead of importing from models
+# from app.models import DamagedGoodsStatus
 
 # ==================== ENUMS ====================
 class PurchaseStatus(str, Enum):
@@ -51,9 +52,8 @@ class RefundStatus(str, Enum):
 class DiscountType(str, Enum):
     PERCENTAGE = "percentage"
     FIXED = "fixed"
-    
-    
-    # Add this near the top of schemas.py with other enums
+
+# Damaged Goods Status - Define ONCE here
 class DamagedGoodsStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
@@ -746,11 +746,9 @@ class TempItemResponse(TempItemBase):
     
     class Config:
         from_attributes = True
-        
-        
-        
-        
-        # ==================== DAMAGED GOODS SCHEMAS ====================
+
+
+# ==================== DAMAGED GOODS SCHEMAS ====================
 class DamagedGoodsBase(BaseModel):
     product_id: int
     quantity: float = Field(..., gt=0)
@@ -790,8 +788,6 @@ class DamagedGoodsResponse(DamagedGoodsBase):
     
     class Config:
         from_attributes = True
-        
-        
 
 
 # ==================== SETTINGS SCHEMAS ====================
@@ -891,12 +887,9 @@ class UserProfileUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     email: Optional[EmailStr] = None
     password: Optional[str] = Field(None, min_length=6)
-    
-    
-    
-    
-    
-    # ==================== VAT TRACKING SCHEMAS ====================
+
+
+# ==================== VAT TRACKING SCHEMAS ====================
 
 class VATStatus(str, Enum):
     PENDING = "pending"
@@ -1045,14 +1038,14 @@ class VATSummaryResponse(VATSummaryBase):
     total_purchase_vat: float
     total_purchases_incl_vat: float
     purchase_count: int
-    purchase_by_group: Optional[dict] = None  # JSON breakdown by product group
+    purchase_by_group: Optional[dict] = None
     
     # Sale totals
     total_sales_excl_vat: float
     total_sale_vat: float
     total_sales_incl_vat: float
     sale_count: int
-    sale_by_group: Optional[dict] = None  # JSON breakdown by product group
+    sale_by_group: Optional[dict] = None
     
     # VAT payable/receivable
     vat_payable: float
@@ -1115,9 +1108,9 @@ class VATPeriodReport(BaseModel):
     sales_by_group: dict
     
     # VAT calculation
-    vat_payable: float  # Sale VAT - Purchase VAT (if positive)
-    vat_receivable: float  # Purchase VAT - Sale VAT (if positive)
-    net_vat_due: float  # Amount to pay or receive
+    vat_payable: float
+    vat_receivable: float
+    net_vat_due: float
     
     # Profit analysis
     gross_profit: float
