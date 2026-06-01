@@ -599,6 +599,59 @@ class SystemLog(Base):
     user = relationship("User", foreign_keys=[user_id])
 
 
+
+
+
+
+# ==================== DAMAGED GOODS MODEL ====================
+class DamagedGoodsStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PROCESSED = "processed"
+
+class DamagedGoods(Base):
+    """Track damaged goods reported by sales staff"""
+    __tablename__ = "damaged_goods"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    report_number = Column(String(50), unique=True, nullable=False, index=True)
+    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    quantity = Column(DECIMAL(12, 2), nullable=False)
+    reason = Column(Text, nullable=False)
+    notes = Column(Text, nullable=True)
+    reported_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    reported_at = Column(DateTime(timezone=True), server_default=func.now())
+    status = Column(String(50), default=DamagedGoodsStatus.PENDING.value)
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    processed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    branch = relationship("Branch", foreign_keys=[branch_id])
+    product = relationship("Product")
+    reporter = relationship("User", foreign_keys=[reported_by])
+    approver = relationship("User", foreign_keys=[approved_by])
+    processor = relationship("User", foreign_keys=[processed_by])
+
+    __table_args__ = (
+        Index('idx_damaged_branch', 'branch_id'),
+        Index('idx_damaged_status', 'status'),
+        Index('idx_damaged_date', 'reported_at'),
+    )
+
+
+
+
+
+
+
+
+
 # ==================== TEMP ITEM MODEL ====================
 class TempItemStatus(str, enum.Enum):
     PENDING = "pending"
@@ -628,18 +681,240 @@ class TempItem(Base):
     registrar = relationship("User", foreign_keys=[registered_by])
     receiver = relationship("User", foreign_keys=[received_by])
 
+# ==================== VAT TRACKING MODELS ====================
 
-# ==================== Add reverse relationships ====================
-Product.purchase_order_items = relationship("PurchaseOrderItem", back_populates="product")
-Product.loan_items = relationship("LoanItem", back_populates="product")
-Product.refund_items = relationship("RefundItem", back_populates="product")
-SaleItem.refund_items = relationship("RefundItem", back_populates="sale_item")
-Branch.purchase_orders = relationship("PurchaseOrder", back_populates="branch")
-Branch.loans = relationship("Loan", back_populates="branch")
-Branch.bank_accounts = relationship("BankAccount", back_populates="branch")
-User.purchase_orders = relationship("PurchaseOrder", back_populates="creator")
-User.loans_created = relationship("Loan", foreign_keys=[Loan.created_by], back_populates="creator")
-User.loans_approved = relationship("Loan", foreign_keys=[Loan.approved_by], back_populates="approver")
-User.loan_payments = relationship("LoanPayment", back_populates="recorder")
-User.refunds = relationship("Refund", foreign_keys=[Refund.user_id], back_populates="user")
-# Add bank_account relationship to PurchaseOrder (already added above)
+class VATTransactionType(str, enum.Enum):
+    PURCHASE = "purchase"
+    SALE = "sale"
+
+class VATStatus(str, enum.Enum):
+    PENDING = "pending"
+    FILED = "filed"
+    PAID = "paid"
+    CANCELLED = "cancelled"
+
+class VATPurchase(Base):
+    """Track VAT on purchases - detailed stock valuation with product grouping"""
+    __tablename__ = "vat_purchases"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    vat_number = Column(String(50), unique=True, nullable=False, index=True)
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
+    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    
+    # Product information
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    product_name = Column(String(255), nullable=False)
+    product_group = Column(String(100), nullable=True)  # Product category/group
+    sku = Column(String(100), nullable=False)
+    
+    # Quantity and cost
+    quantity = Column(DECIMAL(12, 2), nullable=False)
+    unit_cost = Column(DECIMAL(12, 2), nullable=False)  # Cost price per unit (excl VAT)
+    total_cost = Column(DECIMAL(12, 2), nullable=False)  # Quantity × Unit cost
+    
+    # VAT calculations
+    vat_rate = Column(DECIMAL(5, 2), default=15.00)  # VAT rate percentage
+    vat_amount = Column(DECIMAL(12, 2), nullable=False)  # Total cost × VAT rate
+    total_with_vat = Column(DECIMAL(12, 2), nullable=False)  # Total cost + VAT
+    
+    # Selling price calculation (cost / 0.85 to get 15% margin + VAT)
+    calculated_selling_price = Column(DECIMAL(12, 2), nullable=True)  # (unit_cost / 0.85) for 15% markup
+    calculated_selling_price_with_vat = Column(DECIMAL(12, 2), nullable=True)  # Selling price + VAT
+    
+    # Current stock tracking from this purchase batch
+    current_stock = Column(DECIMAL(12, 2), default=0)  # Remaining stock from this purchase
+    sold_quantity = Column(DECIMAL(12, 2), default=0)  # Quantity sold
+    sold_value = Column(DECIMAL(12, 2), default=0)  # Total value of sold items (excl VAT)
+    sold_vat = Column(DECIMAL(12, 2), default=0)  # VAT from sold items
+    current_value = Column(DECIMAL(12, 2), default=0)  # Value of remaining stock (excl VAT)
+    current_vat = Column(DECIMAL(12, 2), default=0)  # VAT on remaining stock
+    
+    # Supplier information
+    supplier_name = Column(String(255), nullable=True)
+    invoice_number = Column(String(100), nullable=True)
+    purchase_date = Column(DateTime(timezone=True), nullable=False)
+    
+    # Status
+    status = Column(String(50), default=VATStatus.PENDING.value)
+    notes = Column(Text, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    # Relationships
+    branch = relationship("Branch", foreign_keys=[branch_id])
+    product = relationship("Product", foreign_keys=[product_id])
+    creator = relationship("User", foreign_keys=[created_by])
+    purchase_order = relationship("PurchaseOrder", foreign_keys=[purchase_order_id])
+    vat_sales = relationship("VATSale", back_populates="vat_purchase", cascade="all, delete-orphan")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_vat_purchase_branch', 'branch_id'),
+        Index('idx_vat_purchase_product', 'product_id'),
+        Index('idx_vat_purchase_group', 'product_group'),
+        Index('idx_vat_purchase_date', 'purchase_date'),
+        Index('idx_vat_purchase_status', 'status'),
+    )
+
+
+class VATSale(Base):
+    """Track VAT on sales - linking sales to original purchase batches"""
+    __tablename__ = "vat_sales"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    vat_sale_number = Column(String(50), unique=True, nullable=False, index=True)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False)
+    sale_item_id = Column(Integer, ForeignKey("sale_items.id"), nullable=True)
+    vat_purchase_id = Column(Integer, ForeignKey("vat_purchases.id"), nullable=False)
+    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    
+    # Product information
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    product_name = Column(String(255), nullable=False)
+    product_group = Column(String(100), nullable=True)
+    sku = Column(String(100), nullable=False)
+    
+    # Quantity and pricing
+    quantity = Column(DECIMAL(12, 2), nullable=False)
+    unit_cost = Column(DECIMAL(12, 2), nullable=False)  # Original cost from purchase (excl VAT)
+    selling_price = Column(DECIMAL(12, 2), nullable=False)  # Selling price per unit (excl VAT)
+    selling_price_with_vat = Column(DECIMAL(12, 2), nullable=False)  # Selling price + VAT
+    
+    # VAT calculations
+    vat_rate = Column(DECIMAL(5, 2), default=15.00)
+    vat_amount = Column(DECIMAL(12, 2), nullable=False)  # Quantity × selling_price × vat_rate / 100
+    total_amount = Column(DECIMAL(12, 2), nullable=False)  # Quantity × selling_price (excl VAT)
+    total_amount_with_vat = Column(DECIMAL(12, 2), nullable=False)  # Total amount + VAT
+    
+    # Profit tracking
+    cost_of_goods_sold = Column(DECIMAL(12, 2), nullable=False)  # Quantity × unit_cost
+    profit = Column(DECIMAL(12, 2), nullable=False)  # Total amount - cost_of_goods_sold
+    profit_margin = Column(DECIMAL(5, 2), nullable=False)  # (Profit / Total amount) × 100
+    
+    # Customer information
+    customer_name = Column(String(255), nullable=True)
+    invoice_number = Column(String(50), nullable=True)
+    sale_date = Column(DateTime(timezone=True), nullable=False)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    # Relationships
+    sale = relationship("Sale", foreign_keys=[sale_id])
+    sale_item = relationship("SaleItem", foreign_keys=[sale_item_id])
+    vat_purchase = relationship("VATPurchase", back_populates="vat_sales")
+    product = relationship("Product", foreign_keys=[product_id])
+    branch = relationship("Branch", foreign_keys=[branch_id])
+    creator = relationship("User", foreign_keys=[created_by])
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_vat_sale_branch', 'branch_id'),
+        Index('idx_vat_sale_product', 'product_id'),
+        Index('idx_vat_sale_group', 'product_group'),
+        Index('idx_vat_sale_date', 'sale_date'),
+        Index('idx_vat_purchase', 'vat_purchase_id'),
+    )
+
+
+class VATSummary(Base):
+    """Monthly VAT summary for reporting"""
+    __tablename__ = "vat_summaries"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    summary_month = Column(String(7), nullable=False)  # Format: YYYY-MM
+    summary_year = Column(Integer, nullable=False)
+    summary_month_num = Column(Integer, nullable=False)  # 1-12
+    
+    # Purchase totals
+    total_purchases_excl_vat = Column(DECIMAL(12, 2), default=0)
+    total_purchase_vat = Column(DECIMAL(12, 2), default=0)
+    total_purchases_incl_vat = Column(DECIMAL(12, 2), default=0)
+    purchase_count = Column(Integer, default=0)
+    
+    # Purchase by product group
+    purchase_by_group = Column(Text, nullable=True)  # JSON string of group breakdown
+    
+    # Sale totals
+    total_sales_excl_vat = Column(DECIMAL(12, 2), default=0)
+    total_sale_vat = Column(DECIMAL(12, 2), default=0)
+    total_sales_incl_vat = Column(DECIMAL(12, 2), default=0)
+    sale_count = Column(Integer, default=0)
+    
+    # Sale by product group
+    sale_by_group = Column(Text, nullable=True)  # JSON string of group breakdown
+    
+    # VAT payable/receivable (Sale VAT - Purchase VAT)
+    vat_payable = Column(DECIMAL(12, 2), default=0)
+    vat_receivable = Column(DECIMAL(12, 2), default=0)  # If purchase VAT > sale VAT
+    net_vat = Column(DECIMAL(12, 2), default=0)  # Positive = payable, Negative = receivable
+    
+    # Profit summary
+    total_profit_excl_vat = Column(DECIMAL(12, 2), default=0)  # Sales - COGS
+    average_profit_margin = Column(DECIMAL(5, 2), default=0)
+    
+    # Status
+    status = Column(String(50), default=VATStatus.PENDING.value)
+    filed_date = Column(DateTime(timezone=True), nullable=True)
+    payment_date = Column(DateTime(timezone=True), nullable=True)
+    payment_reference = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    
+    # Relationships
+    branch = relationship("Branch", foreign_keys=[branch_id])
+    creator = relationship("User", foreign_keys=[created_by])
+    
+    # Indexes
+    __table_args__ = (
+        UniqueConstraint('branch_id', 'summary_month', name='unique_branch_month'),
+        Index('idx_vat_summary_month', 'summary_month'),
+        Index('idx_vat_summary_status', 'status'),
+    )
+
+
+class VATRateHistory(Base):
+    """Track VAT rate changes over time"""
+    __tablename__ = "vat_rate_histories"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    vat_rate = Column(DECIMAL(5, 2), nullable=False)
+    effective_from = Column(DateTime(timezone=True), nullable=False)
+    effective_to = Column(DateTime(timezone=True), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    creator = relationship("User", foreign_keys=[created_by])
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_vat_rate_effective', 'effective_from', 'effective_to'),
+    )
+
+
+# ==================== Update Reverse Relationships for VAT ====================
+Product.vat_purchases = relationship("VATPurchase", back_populates="product", cascade="all, delete-orphan")
+Product.vat_sales = relationship("VATSale", back_populates="product", cascade="all, delete-orphan")
+Branch.vat_purchases = relationship("VATPurchase", back_populates="branch", cascade="all, delete-orphan")
+Branch.vat_sales = relationship("VATSale", back_populates="branch", cascade="all, delete-orphan")
+Branch.vat_summaries = relationship("VATSummary", back_populates="branch", cascade="all, delete-orphan")
+PurchaseOrder.vat_purchases = relationship("VATPurchase", back_populates="purchase_order", cascade="all, delete-orphan")
+Sale.vat_sales = relationship("VATSale", back_populates="sale", cascade="all, delete-orphan")
+SaleItem.vat_sale = relationship("VATSale", back_populates="sale_item", uselist=False)
+
+User.vat_purchases_created = relationship("VATPurchase", foreign_keys=[VATPurchase.created_by], back_populates="creator")
+User.vat_sales_created = relationship("VATSale", foreign_keys=[VATSale.created_by], back_populates="creator")
+User.vat_summaries_created = relationship("VATSummary", foreign_keys=[VATSummary.created_by], back_populates="creator")
+User.vat_rates_created = relationship("VATRateHistory", foreign_keys=[VATRateHistory.created_by], back_populates="creator")

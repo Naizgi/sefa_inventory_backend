@@ -23,6 +23,7 @@ from app.routes import (
     loan_router, products_router, purchase_router, reports_router,
     sales_router, stock_router, temp_items_router, users_router
 )
+from app.routers.vat import router as vat_router  # NEW: Import VAT router
 
 # ==================== SCHEDULER ====================
 scheduler = BackgroundScheduler()
@@ -175,6 +176,7 @@ app.include_router(loan_router)
 app.include_router(purchase_router)
 app.include_router(temp_items_router)
 app.include_router(settings_router)
+app.include_router(vat_router)  # NEW: Include VAT router
 
 # ==================== TEST EMAIL ENDPOINT ====================
 @app.post("/api/test/email")
@@ -279,3 +281,24 @@ def db_info(current_user: User = Depends(get_current_user)):
             "database_type": "Other",
             "url": settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "hidden"
         }
+
+# ==================== VAT ROUTES OVERVIEW ====================
+@app.get("/api/vat/info")
+def vat_info(current_user: User = Depends(get_current_user)):
+    """Get VAT system information"""
+    return {
+        "module": "VAT Tracking System",
+        "version": "1.0.0",
+        "description": "Track VAT on purchases and sales, manage VAT returns, and calculate selling prices",
+        "endpoints": [
+            {"path": "/api/vat/purchases", "methods": ["GET", "POST"], "description": "Manage VAT purchases"},
+            {"path": "/api/vat/sales", "methods": ["GET", "POST"], "description": "Manage VAT sales"},
+            {"path": "/api/vat/stock", "methods": ["GET"], "description": "View available stock from VAT purchases"},
+            {"path": "/api/vat/summaries", "methods": ["GET", "POST"], "description": "Monthly VAT summaries"},
+            {"path": "/api/vat/rates", "methods": ["GET", "POST"], "description": "VAT rate history"},
+            {"path": "/api/vat/reports", "methods": ["GET"], "description": "VAT reports and analytics"},
+            {"path": "/api/vat/dashboard", "methods": ["GET"], "description": "VAT dashboard"},
+            {"path": "/api/vat/calculate-selling-price", "methods": ["POST"], "description": "Calculate selling price from cost"},
+            {"path": "/api/vat/calculate-vat", "methods": ["POST"], "description": "Calculate VAT amount"}
+        ]
+    }

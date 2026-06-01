@@ -737,6 +737,52 @@ class TempItemResponse(TempItemBase):
     
     class Config:
         from_attributes = True
+        
+        
+        
+        
+        # ==================== DAMAGED GOODS SCHEMAS ====================
+class DamagedGoodsBase(BaseModel):
+    product_id: int
+    quantity: float = Field(..., gt=0)
+    reason: str = Field(..., min_length=3)
+    notes: Optional[str] = None
+
+class DamagedGoodsCreate(DamagedGoodsBase):
+    pass
+
+class DamagedGoodsUpdate(BaseModel):
+    status: Optional[DamagedGoodsStatus] = None
+    notes: Optional[str] = None
+
+class DamagedGoodsApprove(BaseModel):
+    approved: bool = True
+    notes: Optional[str] = None
+
+class DamagedGoodsResponse(DamagedGoodsBase):
+    id: int
+    report_number: str
+    branch_id: int
+    branch_name: Optional[str] = None
+    product_name: Optional[str] = None
+    product_sku: Optional[str] = None
+    quantity: float
+    reason: str
+    notes: Optional[str] = None
+    reported_by: str
+    reported_at: datetime
+    status: DamagedGoodsStatus
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    processed_by: Optional[str] = None
+    processed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True
+        
+        
 
 
 # ==================== SETTINGS SCHEMAS ====================
@@ -836,3 +882,323 @@ class UserProfileUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     email: Optional[EmailStr] = None
     password: Optional[str] = Field(None, min_length=6)
+    
+    
+    
+    
+    
+    # ==================== VAT TRACKING SCHEMAS ====================
+
+class VATStatus(str, Enum):
+    PENDING = "pending"
+    FILED = "filed"
+    PAID = "paid"
+    CANCELLED = "cancelled"
+
+
+class VATPurchaseBase(BaseModel):
+    product_id: int
+    quantity: float = Field(..., gt=0)
+    unit_cost: float = Field(..., gt=0)
+    vat_rate: float = Field(default=15.0, ge=0, le=100)
+    supplier_name: Optional[str] = Field(None, max_length=255)
+    invoice_number: Optional[str] = Field(None, max_length=100)
+    purchase_date: datetime
+    product_group: Optional[str] = Field(None, max_length=100)
+    notes: Optional[str] = None
+
+
+class VATPurchaseCreate(VATPurchaseBase):
+    purchase_order_id: Optional[int] = None
+
+
+class VATPurchaseUpdate(BaseModel):
+    status: Optional[VATStatus] = None
+    notes: Optional[str] = None
+    current_stock: Optional[float] = Field(None, ge=0)
+    sold_quantity: Optional[float] = Field(None, ge=0)
+    sold_value: Optional[float] = Field(None, ge=0)
+    sold_vat: Optional[float] = Field(None, ge=0)
+
+
+class VATPurchaseResponse(VATPurchaseBase):
+    id: int
+    vat_number: str
+    branch_id: int
+    branch_name: Optional[str] = None
+    product_name: str
+    sku: str
+    total_cost: float
+    vat_amount: float
+    total_with_vat: float
+    calculated_selling_price: Optional[float] = None
+    calculated_selling_price_with_vat: Optional[float] = None
+    current_stock: float
+    sold_quantity: float
+    sold_value: float
+    sold_vat: float
+    current_value: float
+    current_vat: float
+    status: VATStatus
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    created_by: str
+    created_by_name: Optional[str] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VATPurchaseStockResponse(BaseModel):
+    """Response for stock tracking from VAT purchases"""
+    id: int
+    vat_number: str
+    product_id: int
+    product_name: str
+    product_group: Optional[str]
+    sku: str
+    current_stock: float
+    unit_cost: float
+    current_value: float
+    purchase_date: datetime
+    supplier_name: Optional[str]
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VATSaleBase(BaseModel):
+    sale_id: int
+    sale_item_id: Optional[int] = None
+    vat_purchase_id: int
+    quantity: float = Field(..., gt=0)
+    selling_price: float = Field(..., gt=0)  # Per unit excl VAT
+
+
+class VATSaleCreate(VATSaleBase):
+    pass
+
+
+class VATSaleResponse(VATSaleBase):
+    id: int
+    vat_sale_number: str
+    branch_id: int
+    branch_name: Optional[str] = None
+    product_id: int
+    product_name: str
+    product_group: Optional[str] = None
+    sku: str
+    unit_cost: float
+    selling_price_with_vat: float
+    vat_rate: float
+    vat_amount: float
+    total_amount: float  # excl VAT
+    total_amount_with_vat: float
+    cost_of_goods_sold: float
+    profit: float
+    profit_margin: float
+    customer_name: Optional[str] = None
+    invoice_number: Optional[str] = None
+    sale_date: datetime
+    created_at: datetime
+    created_by: str
+    created_by_name: Optional[str] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VATSummaryBase(BaseModel):
+    summary_month: str  # Format: YYYY-MM
+    notes: Optional[str] = None
+
+
+class VATSummaryCreate(VATSummaryBase):
+    branch_id: int
+    summary_year: int
+    summary_month_num: int
+
+
+class VATSummaryUpdate(BaseModel):
+    status: Optional[VATStatus] = None
+    filed_date: Optional[datetime] = None
+    payment_date: Optional[datetime] = None
+    payment_reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class VATSummaryResponse(VATSummaryBase):
+    id: int
+    branch_id: int
+    branch_name: Optional[str] = None
+    summary_year: int
+    summary_month_num: int
+    
+    # Purchase totals
+    total_purchases_excl_vat: float
+    total_purchase_vat: float
+    total_purchases_incl_vat: float
+    purchase_count: int
+    purchase_by_group: Optional[dict] = None  # JSON breakdown by product group
+    
+    # Sale totals
+    total_sales_excl_vat: float
+    total_sale_vat: float
+    total_sales_incl_vat: float
+    sale_count: int
+    sale_by_group: Optional[dict] = None  # JSON breakdown by product group
+    
+    # VAT payable/receivable
+    vat_payable: float
+    vat_receivable: float
+    net_vat: float
+    
+    # Profit summary
+    total_profit_excl_vat: float
+    average_profit_margin: float
+    
+    # Status
+    status: VATStatus
+    filed_date: Optional[datetime] = None
+    payment_date: Optional[datetime] = None
+    payment_reference: Optional[str] = None
+    
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VATRateHistoryBase(BaseModel):
+    vat_rate: float = Field(..., ge=0, le=100)
+    effective_from: datetime
+    effective_to: Optional[datetime] = None
+    notes: Optional[str] = None
+
+
+class VATRateHistoryCreate(VATRateHistoryBase):
+    pass
+
+
+class VATRateHistoryResponse(VATRateHistoryBase):
+    id: int
+    created_by: str
+    created_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==================== VAT REPORT SCHEMAS ====================
+
+class VATPeriodReport(BaseModel):
+    """VAT report for a specific period"""
+    period_start: date
+    period_end: date
+    branch_id: Optional[int] = None
+    branch_name: Optional[str] = None
+    
+    # Purchase summary
+    total_purchases: float
+    total_purchase_vat: float
+    purchases_by_group: dict
+    
+    # Sale summary
+    total_sales: float
+    total_sale_vat: float
+    sales_by_group: dict
+    
+    # VAT calculation
+    vat_payable: float  # Sale VAT - Purchase VAT (if positive)
+    vat_receivable: float  # Purchase VAT - Sale VAT (if positive)
+    net_vat_due: float  # Amount to pay or receive
+    
+    # Profit analysis
+    gross_profit: float
+    profit_margin: float
+    
+    # Transactions
+    purchase_transactions: List[VATPurchaseResponse] = []
+    sale_transactions: List[VATSaleResponse] = []
+
+
+class VATProductGroupReport(BaseModel):
+    """VAT report grouped by product category"""
+    product_group: str
+    total_purchases_excl_vat: float
+    total_purchase_vat: float
+    total_sales_excl_vat: float
+    total_sale_vat: float
+    vat_contribution: float
+    profit: float
+    profit_margin: float
+    quantity_purchased: float
+    quantity_sold: float
+
+
+class VATDashboardSummary(BaseModel):
+    """Dashboard summary for VAT"""
+    current_month_summary: Optional[VATSummaryResponse] = None
+    previous_month_summary: Optional[VATSummaryResponse] = None
+    year_to_date_purchases: float
+    year_to_date_sales: float
+    year_to_date_vat_payable: float
+    pending_vat_returns: int
+    current_vat_rate: float
+    vat_rate_history: List[VATRateHistoryResponse] = []
+    top_product_groups_by_vat: List[VATProductGroupReport] = []
+
+
+# ==================== VAT CALCULATION HELPERS ====================
+
+def calculate_vat_amount(amount: float, vat_rate: float = 15.0) -> dict:
+    """Calculate VAT amount and total including VAT"""
+    vat_amount = amount * (vat_rate / 100)
+    total_with_vat = amount + vat_amount
+    return {
+        "excl_vat": round(amount, 2),
+        "vat_amount": round(vat_amount, 2),
+        "incl_vat": round(total_with_vat, 2),
+        "vat_rate": vat_rate
+    }
+
+
+def calculate_selling_price(unit_cost: float, markup_percentage: float = 15.0, vat_rate: float = 15.0) -> dict:
+    """
+    Calculate selling price based on cost with markup and VAT
+    Formula: Selling Price (excl VAT) = Cost ÷ (1 - markup_percentage/100)
+    Then add VAT for final price
+    """
+    if markup_percentage <= 0 or markup_percentage >= 100:
+        markup_percentage = 15.0
+    
+    # Calculate selling price excl VAT (cost divided by (1 - markup%))
+    selling_price_excl_vat = unit_cost / (1 - (markup_percentage / 100))
+    
+    # Calculate VAT
+    vat_amount = selling_price_excl_vat * (vat_rate / 100)
+    selling_price_incl_vat = selling_price_excl_vat + vat_amount
+    
+    return {
+        "unit_cost": round(unit_cost, 2),
+        "markup_percentage": markup_percentage,
+        "selling_price_excl_vat": round(selling_price_excl_vat, 2),
+        "vat_rate": vat_rate,
+        "vat_amount": round(vat_amount, 2),
+        "selling_price_incl_vat": round(selling_price_incl_vat, 2),
+        "profit_per_unit": round(selling_price_excl_vat - unit_cost, 2),
+        "profit_margin": round(((selling_price_excl_vat - unit_cost) / selling_price_excl_vat) * 100, 2)
+    }
+
+
+def calculate_cogs_and_profit(quantity: float, unit_cost: float, selling_price_excl_vat: float) -> dict:
+    """Calculate Cost of Goods Sold and profit"""
+    cogs = quantity * unit_cost
+    total_revenue = quantity * selling_price_excl_vat
+    profit = total_revenue - cogs
+    profit_margin = (profit / total_revenue * 100) if total_revenue > 0 else 0
+    
+    return {
+        "quantity": quantity,
+        "cogs": round(cogs, 2),
+        "total_revenue": round(total_revenue, 2),
+        "profit": round(profit, 2),
+        "profit_margin": round(profit_margin, 2)
+    }
