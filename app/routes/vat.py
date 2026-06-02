@@ -72,15 +72,20 @@ def create_vat_purchase(
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     
+    # Convert to Decimal to ensure proper type
+    quantity = Decimal(str(purchase_data.quantity))
+    unit_cost = Decimal(str(purchase_data.unit_cost))
+    vat_rate = Decimal(str(purchase_data.vat_rate))
+    
     # Calculate totals
-    total_cost = purchase_data.quantity * purchase_data.unit_cost
-    vat_calc = calculate_vat_amount(total_cost, purchase_data.vat_rate)
+    total_cost = quantity * unit_cost
+    vat_calc = calculate_vat_amount(float(total_cost), float(vat_rate))
     
     # Calculate selling price (15% markup by default)
     selling_price_calc = calculate_selling_price(
-        purchase_data.unit_cost, 
+        float(unit_cost), 
         markup_percentage=15.0, 
-        vat_rate=purchase_data.vat_rate
+        vat_rate=float(vat_rate)
     )
     
     # Create VAT purchase record
@@ -92,15 +97,15 @@ def create_vat_purchase(
         product_name=product.name,
         product_group=purchase_data.product_group or "Uncategorized",
         sku=product.sku,
-        quantity=purchase_data.quantity,
-        unit_cost=purchase_data.unit_cost,
+        quantity=quantity,
+        unit_cost=unit_cost,
         total_cost=total_cost,
-        vat_rate=purchase_data.vat_rate,
-        vat_amount=vat_calc["vat_amount"],
-        total_with_vat=vat_calc["incl_vat"],
-        calculated_selling_price=selling_price_calc["selling_price_excl_vat"],
-        calculated_selling_price_with_vat=selling_price_calc["selling_price_incl_vat"],
-        current_stock=purchase_data.quantity,
+        vat_rate=vat_rate,
+        vat_amount=Decimal(str(vat_calc["vat_amount"])),
+        total_with_vat=Decimal(str(vat_calc["incl_vat"])),
+        calculated_selling_price=Decimal(str(selling_price_calc["selling_price_excl_vat"])),
+        calculated_selling_price_with_vat=Decimal(str(selling_price_calc["selling_price_incl_vat"])),
+        current_stock=quantity,
         supplier_name=purchase_data.supplier_name,
         invoice_number=purchase_data.invoice_number,
         purchase_date=purchase_data.purchase_date,
@@ -117,11 +122,11 @@ def create_vat_purchase(
         branch_id=branch_id,
         product_id=purchase_data.product_id,
         user_id=current_user.id,
-        change_qty=purchase_data.quantity,
+        change_qty=quantity,
         movement_type="vat_purchase_in",
         with_vat=True,
         reference_id=vat_purchase.id,
-        notes=f"VAT Purchase #{vat_purchase.vat_number} - Cost: {purchase_data.unit_cost}"
+        notes=f"VAT Purchase #{vat_purchase.vat_number} - Cost: {unit_cost}"
     )
     db.add(stock_movement)
     
@@ -132,18 +137,19 @@ def create_vat_purchase(
     ).first()
     
     if stock:
-        stock.quantity += purchase_data.quantity
-        if purchase_data.vat_rate > 0:
-            stock.quantity_with_vat += purchase_data.quantity
+        # FIX: Convert to Decimal for proper arithmetic
+        stock.quantity += quantity
+        if vat_rate > 0:
+            stock.quantity_with_vat += quantity
         else:
-            stock.quantity_without_vat += purchase_data.quantity
+            stock.quantity_without_vat += quantity
     else:
         stock = Stock(
             branch_id=branch_id,
             product_id=purchase_data.product_id,
-            quantity=purchase_data.quantity,
-            quantity_with_vat=purchase_data.quantity if purchase_data.vat_rate > 0 else 0,
-            quantity_without_vat=purchase_data.quantity if purchase_data.vat_rate == 0 else 0,
+            quantity=quantity,
+            quantity_with_vat=quantity if vat_rate > 0 else Decimal('0'),
+            quantity_without_vat=quantity if vat_rate == 0 else Decimal('0'),
             reorder_level=0
         )
         db.add(stock)
@@ -224,6 +230,9 @@ def update_vat_purchase(
         raise HTTPException(status_code=404, detail="VAT purchase not found")
     
     for field, value in update_data.model_dump(exclude_unset=True).items():
+        # Convert to Decimal if it's a numeric field
+        if field in ['quantity', 'unit_cost', 'vat_rate'] and value is not None:
+            value = Decimal(str(value))
         setattr(purchase, field, value)
     
     purchase.updated_at = datetime.now()
@@ -251,8 +260,12 @@ def create_vat_sale(
     if not vat_purchase:
         raise HTTPException(status_code=404, detail="VAT purchase not found")
     
+    # Convert to Decimal
+    quantity = Decimal(str(sale_data.quantity))
+    selling_price = Decimal(str(sale_data.selling_price))
+    
     # Check if enough stock
-    if vat_purchase.current_stock < sale_data.quantity:
+    if vat_purchase.current_stock < quantity:
         raise HTTPException(
             status_code=400, 
             detail=f"Insufficient stock. Available: {vat_purchase.current_stock}"
@@ -270,14 +283,14 @@ def create_vat_sale(
     
     # Calculate values
     vat_calc = calculate_vat_amount(
-        sale_data.quantity * sale_data.selling_price, 
-        vat_purchase.vat_rate
+        float(quantity * selling_price), 
+        float(vat_purchase.vat_rate)
     )
     
     cogs_calc = calculate_cogs_and_profit(
-        sale_data.quantity,
-        vat_purchase.unit_cost,
-        sale_data.selling_price
+        float(quantity),
+        float(vat_purchase.unit_cost),
+        float(selling_price)
     )
     
     # Create VAT sale record
@@ -291,17 +304,17 @@ def create_vat_sale(
         product_name=vat_purchase.product_name,
         product_group=vat_purchase.product_group,
         sku=vat_purchase.sku,
-        quantity=sale_data.quantity,
+        quantity=quantity,
         unit_cost=vat_purchase.unit_cost,
-        selling_price=sale_data.selling_price,
-        selling_price_with_vat=vat_calc["incl_vat"] / sale_data.quantity if sale_data.quantity > 0 else 0,
+        selling_price=selling_price,
+        selling_price_with_vat=Decimal(str(vat_calc["incl_vat"] / float(quantity))) if quantity > 0 else Decimal('0'),
         vat_rate=vat_purchase.vat_rate,
-        vat_amount=vat_calc["vat_amount"],
-        total_amount=vat_calc["excl_vat"],
-        total_amount_with_vat=vat_calc["incl_vat"],
-        cost_of_goods_sold=cogs_calc["cogs"],
-        profit=cogs_calc["profit"],
-        profit_margin=cogs_calc["profit_margin"],
+        vat_amount=Decimal(str(vat_calc["vat_amount"])),
+        total_amount=Decimal(str(vat_calc["excl_vat"])),
+        total_amount_with_vat=Decimal(str(vat_calc["incl_vat"])),
+        cost_of_goods_sold=Decimal(str(cogs_calc["cogs"])),
+        profit=Decimal(str(cogs_calc["profit"])),
+        profit_margin=Decimal(str(cogs_calc["profit_margin"])),
         customer_name=sale.customer_name,
         invoice_number=sale.invoice_number,
         sale_date=sale.created_at,
@@ -311,9 +324,9 @@ def create_vat_sale(
     db.add(vat_sale)
     
     # Update VAT purchase stock
-    vat_purchase.sold_quantity += sale_data.quantity
-    vat_purchase.sold_value += sale_data.quantity * sale_data.selling_price
-    vat_purchase.sold_vat += vat_calc["vat_amount"]
+    vat_purchase.sold_quantity += quantity
+    vat_purchase.sold_value += quantity * selling_price
+    vat_purchase.sold_vat += Decimal(str(vat_calc["vat_amount"]))
     update_vat_purchase_stock(vat_purchase, db)
     
     # Record stock movement (sale out)
@@ -321,11 +334,11 @@ def create_vat_sale(
         branch_id=sale.branch_id,
         product_id=vat_purchase.product_id,
         user_id=current_user.id,
-        change_qty=-sale_data.quantity,
+        change_qty=-quantity,
         movement_type="vat_sale_out",
         with_vat=True,
         reference_id=vat_sale.id,
-        notes=f"VAT Sale #{vat_sale.vat_sale_number} - Price: {sale_data.selling_price}"
+        notes=f"VAT Sale #{vat_sale.vat_sale_number} - Price: {selling_price}"
     )
     db.add(stock_movement)
     
@@ -336,11 +349,12 @@ def create_vat_sale(
     ).first()
     
     if stock:
-        stock.quantity -= sale_data.quantity
+        # FIX: Use Decimal for subtraction
+        stock.quantity -= quantity
         if vat_purchase.vat_rate > 0:
-            stock.quantity_with_vat -= sale_data.quantity
+            stock.quantity_with_vat -= quantity
         else:
-            stock.quantity_without_vat -= sale_data.quantity
+            stock.quantity_without_vat -= quantity
     
     db.commit()
     db.refresh(vat_sale)
@@ -446,10 +460,10 @@ def get_vat_stock_summary(
     total_items = sum(p.current_stock for p in purchases)
     
     return {
-        "total_items": total_items,
-        "total_stock_value": total_stock_value,
-        "total_stock_vat": total_stock_vat,
-        "total_stock_with_vat": total_stock_value + total_stock_vat,
+        "total_items": float(total_items),
+        "total_stock_value": float(total_stock_value),
+        "total_stock_vat": float(total_stock_vat),
+        "total_stock_with_vat": float(total_stock_value + total_stock_vat),
         "unique_products": len(set(p.product_id for p in purchases)),
         "purchase_batches": len(purchases)
     }
@@ -505,9 +519,9 @@ def generate_vat_summary(
         group = p.product_group or "Uncategorized"
         if group not in purchase_by_group:
             purchase_by_group[group] = {"excl_vat": 0, "vat": 0, "incl_vat": 0}
-        purchase_by_group[group]["excl_vat"] += p.total_cost
-        purchase_by_group[group]["vat"] += p.vat_amount
-        purchase_by_group[group]["incl_vat"] += p.total_with_vat
+        purchase_by_group[group]["excl_vat"] += float(p.total_cost)
+        purchase_by_group[group]["vat"] += float(p.vat_amount)
+        purchase_by_group[group]["incl_vat"] += float(p.total_with_vat)
     
     # Get VAT sales for the month
     sales = db.query(VATSale).filter(
@@ -525,7 +539,7 @@ def generate_vat_summary(
     total_sale_vat = sum(s.vat_amount for s in sales)
     total_sales_incl_vat = sum(s.total_amount_with_vat for s in sales)
     total_profit = sum(s.profit for s in sales)
-    avg_profit_margin = (total_profit / total_sales_excl_vat * 100) if total_sales_excl_vat > 0 else 0
+    avg_profit_margin = (float(total_profit) / float(total_sales_excl_vat) * 100) if total_sales_excl_vat > 0 else 0
     
     # Group sales by product group
     sale_by_group = {}
@@ -533,14 +547,14 @@ def generate_vat_summary(
         group = s.product_group or "Uncategorized"
         if group not in sale_by_group:
             sale_by_group[group] = {"excl_vat": 0, "vat": 0, "incl_vat": 0, "profit": 0}
-        sale_by_group[group]["excl_vat"] += s.total_amount
-        sale_by_group[group]["vat"] += s.vat_amount
-        sale_by_group[group]["incl_vat"] += s.total_amount_with_vat
-        sale_by_group[group]["profit"] += s.profit
+        sale_by_group[group]["excl_vat"] += float(s.total_amount)
+        sale_by_group[group]["vat"] += float(s.vat_amount)
+        sale_by_group[group]["incl_vat"] += float(s.total_amount_with_vat)
+        sale_by_group[group]["profit"] += float(s.profit)
     
     # Calculate VAT payable/receivable
-    vat_payable = total_sale_vat - total_purchase_vat
-    vat_receivable = total_purchase_vat - total_sale_vat if vat_payable < 0 else 0
+    vat_payable = float(total_sale_vat - total_purchase_vat)
+    vat_receivable = float(total_purchase_vat - total_sale_vat) if vat_payable < 0 else 0
     net_vat = vat_payable if vat_payable > 0 else -vat_receivable
     
     # Create summary
@@ -563,7 +577,7 @@ def generate_vat_summary(
         vat_receivable=vat_receivable,
         net_vat=net_vat,
         total_profit_excl_vat=total_profit,
-        average_profit_margin=avg_profit_margin,
+        average_profit_margin=Decimal(str(avg_profit_margin)),
         status=VATStatus.PENDING.value,
         created_by=current_user.id
     )
@@ -650,7 +664,7 @@ def create_vat_rate(
         db.commit()
     
     vat_rate = VATRateHistory(
-        vat_rate=rate_data.vat_rate,
+        vat_rate=Decimal(str(rate_data.vat_rate)),
         effective_from=rate_data.effective_from,
         effective_to=rate_data.effective_to,
         notes=rate_data.notes,
@@ -689,7 +703,7 @@ def get_current_vat_rate(
     if not current_rate:
         return {"vat_rate": 15.0, "message": "Default rate 15%"}
     
-    return {"vat_rate": current_rate.vat_rate, "effective_from": current_rate.effective_from}
+    return {"vat_rate": float(current_rate.vat_rate), "effective_from": current_rate.effective_from}
 
 
 # ==================== VAT REPORT ENDPOINTS ====================
@@ -739,30 +753,30 @@ def get_vat_period_report(
     purchases_by_group = {}
     for p in purchases:
         group = p.product_group or "Uncategorized"
-        purchases_by_group[group] = purchases_by_group.get(group, 0) + p.total_cost
+        purchases_by_group[group] = purchases_by_group.get(group, 0) + float(p.total_cost)
     
     sales_by_group = {}
     for s in sales:
         group = s.product_group or "Uncategorized"
-        sales_by_group[group] = sales_by_group.get(group, 0) + s.total_amount
+        sales_by_group[group] = sales_by_group.get(group, 0) + float(s.total_amount)
     
     # VAT calculation
-    vat_payable = max(0, total_sale_vat - total_purchase_vat)
-    vat_receivable = max(0, total_purchase_vat - total_sale_vat)
+    vat_payable = max(0, float(total_sale_vat - total_purchase_vat))
+    vat_receivable = max(0, float(total_purchase_vat - total_sale_vat))
     
     # Profit
-    gross_profit = total_sales - total_purchases
-    profit_margin = (gross_profit / total_sales * 100) if total_sales > 0 else 0
+    gross_profit = float(total_sales - total_purchases)
+    profit_margin = (gross_profit / float(total_sales) * 100) if total_sales > 0 else 0
     
     return VATPeriodReport(
         period_start=from_date,
         period_end=to_date,
         branch_id=branch_id,
-        total_purchases=total_purchases,
-        total_purchase_vat=total_purchase_vat,
+        total_purchases=float(total_purchases),
+        total_purchase_vat=float(total_purchase_vat),
         purchases_by_group=purchases_by_group,
-        total_sales=total_sales,
-        total_sale_vat=total_sale_vat,
+        total_sales=float(total_sales),
+        total_sale_vat=float(total_sale_vat),
         sales_by_group=sales_by_group,
         vat_payable=vat_payable,
         vat_receivable=vat_receivable,
@@ -816,16 +830,16 @@ def get_vat_product_group_report(
                 "quantity_sold": 0
             }
         
-        groups[group]["total_purchases_excl_vat"] += p.total_cost
-        groups[group]["total_purchase_vat"] += p.vat_amount
-        groups[group]["quantity_purchased"] += p.quantity
+        groups[group]["total_purchases_excl_vat"] += float(p.total_cost)
+        groups[group]["total_purchase_vat"] += float(p.vat_amount)
+        groups[group]["quantity_purchased"] += float(p.quantity)
         
         # Get sales for this purchase
         for sale in p.vat_sales:
-            groups[group]["total_sales_excl_vat"] += sale.total_amount
-            groups[group]["total_sale_vat"] += sale.vat_amount
-            groups[group]["profit"] += sale.profit
-            groups[group]["quantity_sold"] += sale.quantity
+            groups[group]["total_sales_excl_vat"] += float(sale.total_amount)
+            groups[group]["total_sale_vat"] += float(sale.vat_amount)
+            groups[group]["profit"] += float(sale.profit)
+            groups[group]["quantity_sold"] += float(sale.quantity)
     
     # Calculate derived fields
     result = []
@@ -901,11 +915,11 @@ def get_vat_dashboard(
     return VATDashboardSummary(
         current_month_summary=current_summary,
         previous_month_summary=previous_summary,
-        year_to_date_purchases=ytd_purchases,
-        year_to_date_sales=ytd_sales,
-        year_to_date_vat_payable=ytd_sale_vat - ytd_purchase_vat,
+        year_to_date_purchases=float(ytd_purchases),
+        year_to_date_sales=float(ytd_sales),
+        year_to_date_vat_payable=float(ytd_sale_vat - ytd_purchase_vat),
         pending_vat_returns=pending_returns,
-        current_vat_rate=current_rate.vat_rate if current_rate else 15.0,
+        current_vat_rate=float(current_rate.vat_rate) if current_rate else 15.0,
         vat_rate_history=rate_history,
         top_product_groups_by_vat=top_groups[:5]
     )
