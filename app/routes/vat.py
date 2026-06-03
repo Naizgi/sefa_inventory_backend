@@ -586,6 +586,12 @@ def generate_vat_summary(
     db.commit()
     db.refresh(summary)
     
+    # FIX: Parse JSON fields before returning
+    if summary.purchase_by_group:
+        summary.purchase_by_group = json.loads(summary.purchase_by_group)
+    if summary.sale_by_group:
+        summary.sale_by_group = json.loads(summary.sale_by_group)
+    
     return summary
 
 
@@ -611,12 +617,16 @@ def get_vat_summaries(
     
     summaries = query.order_by(VATSummary.summary_year.desc(), VATSummary.summary_month_num.desc()).all()
     
-    # Parse JSON fields
+    # FIX: Parse JSON fields for each summary
     for summary in summaries:
         if summary.purchase_by_group:
             summary.purchase_by_group = json.loads(summary.purchase_by_group)
+        else:
+            summary.purchase_by_group = {}
         if summary.sale_by_group:
             summary.sale_by_group = json.loads(summary.sale_by_group)
+        else:
+            summary.sale_by_group = {}
     
     return summaries
 
@@ -640,6 +650,12 @@ def update_vat_summary(
     summary.updated_at = datetime.now()
     db.commit()
     db.refresh(summary)
+    
+    # FIX: Parse JSON fields before returning
+    if summary.purchase_by_group:
+        summary.purchase_by_group = json.loads(summary.purchase_by_group)
+    if summary.sale_by_group:
+        summary.sale_by_group = json.loads(summary.sale_by_group)
     
     return summary
 
@@ -868,18 +884,32 @@ def get_vat_dashboard(
         VATSummary.summary_month == current_month
     ).first()
     
-    if current_summary and current_summary.purchase_by_group:
-        current_summary.purchase_by_group = json.loads(current_summary.purchase_by_group)
-        current_summary.sale_by_group = json.loads(current_summary.sale_by_group)
+    # FIX: Parse JSON fields for current summary
+    if current_summary:
+        if current_summary.purchase_by_group:
+            current_summary.purchase_by_group = json.loads(current_summary.purchase_by_group)
+        else:
+            current_summary.purchase_by_group = {}
+        if current_summary.sale_by_group:
+            current_summary.sale_by_group = json.loads(current_summary.sale_by_group)
+        else:
+            current_summary.sale_by_group = {}
     
     # Get previous month summary
     previous_summary = db.query(VATSummary).filter(
         VATSummary.summary_month == previous_month
     ).first()
     
-    if previous_summary and previous_summary.purchase_by_group:
-        previous_summary.purchase_by_group = json.loads(previous_summary.purchase_by_group)
-        previous_summary.sale_by_group = json.loads(previous_summary.sale_by_group)
+    # FIX: Parse JSON fields for previous summary
+    if previous_summary:
+        if previous_summary.purchase_by_group:
+            previous_summary.purchase_by_group = json.loads(previous_summary.purchase_by_group)
+        else:
+            previous_summary.purchase_by_group = {}
+        if previous_summary.sale_by_group:
+            previous_summary.sale_by_group = json.loads(previous_summary.sale_by_group)
+        else:
+            previous_summary.sale_by_group = {}
     
     # Year to date totals
     year_start = datetime(now.year, 1, 1)
