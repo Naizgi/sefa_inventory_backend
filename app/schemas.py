@@ -944,7 +944,7 @@ class VATPurchaseResponse(VATPurchaseBase):
     status: VATStatus
     created_at: datetime
     updated_at: Optional[datetime] = None
-    created_by: str
+    created_by: int  # CHANGED: from str to int
     created_by_name: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
@@ -1001,7 +1001,7 @@ class VATSaleResponse(VATSaleBase):
     invoice_number: Optional[str] = None
     sale_date: datetime
     created_at: datetime
-    created_by: str
+    created_by: int  # CHANGED: from str to int
     created_by_name: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
@@ -1064,7 +1064,7 @@ class VATSummaryResponse(VATSummaryBase):
     
     created_at: datetime
     updated_at: Optional[datetime] = None
-    created_by: Optional[str] = None
+    created_by: Optional[int] = None  # CHANGED: from Optional[str] to Optional[int]
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -1082,7 +1082,7 @@ class VATRateHistoryCreate(VATRateHistoryBase):
 
 class VATRateHistoryResponse(VATRateHistoryBase):
     id: int
-    created_by: str
+    created_by: int  # CHANGED: from str to int
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
