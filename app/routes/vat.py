@@ -45,7 +45,7 @@ def update_vat_purchase_stock(vat_purchase: VATPurchase, db: Session):
     db.commit()
 
 
-# ==================== VAT PURCHASE ENDPOINTS (Admin/Privileged only) ====================
+# ==================== VAT PURCHASE ENDPOINTS ====================
 
 @router.post("/purchases", response_model=VATPurchaseResponse)
 def create_vat_purchase(
@@ -67,31 +67,34 @@ def create_vat_purchase(
     if not branch_id:
         raise HTTPException(status_code=400, detail="No branch assigned to user")
     
-    product = db.query(Product).filter(Product.id == purchase_data.product_id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    
+    # Convert to Decimal to ensure proper type
     quantity = Decimal(str(purchase_data.quantity))
     unit_cost = Decimal(str(purchase_data.unit_cost))
     vat_rate = Decimal(str(purchase_data.vat_rate))
     
+    # Calculate totals
     total_cost = quantity * unit_cost
     vat_calc = calculate_vat_amount(float(total_cost), float(vat_rate))
     
+    # Calculate selling price (15% markup by default)
     selling_price_calc = calculate_selling_price(
         float(unit_cost), 
         markup_percentage=15.0, 
         vat_rate=float(vat_rate)
     )
     
+    # Use product_name from product_group if not provided
+    product_name = purchase_data.product_name or purchase_data.product_group or "General Stock"
+    
+    # Create VAT purchase record - product_id is now optional
     vat_purchase = VATPurchase(
         vat_number=generate_vat_number("VAT-PUR", branch_id),
         purchase_order_id=purchase_data.purchase_order_id,
         branch_id=branch_id,
-        product_id=purchase_data.product_id,
-        product_name=product.name,
+        product_id=purchase_data.product_id,  # Can be None
+        product_name=product_name,
         product_group=purchase_data.product_group or "Uncategorized",
-        sku=product.sku,
+        sku=purchase_data.sku,
         quantity=quantity,
         unit_cost=unit_cost,
         total_cost=total_cost,
@@ -112,22 +115,32 @@ def create_vat_purchase(
     db.commit()
     db.refresh(vat_purchase)
     
+    # Record stock movement
     stock_movement = StockMovement(
         branch_id=branch_id,
-        product_id=purchase_data.product_id,
+        product_id=purchase_data.product_id,  # Can be None
         user_id=current_user.id,
         change_qty=quantity,
         movement_type="vat_purchase_in",
         with_vat=True,
         reference_id=vat_purchase.id,
-        notes=f"VAT Purchase #{vat_purchase.vat_number} - Cost: {unit_cost}"
+        notes=f"VAT Purchase #{vat_purchase.vat_number} - SKU: {purchase_data.sku} - Cost: {unit_cost}"
     )
     db.add(stock_movement)
     
-    stock = db.query(Stock).filter(
-        Stock.branch_id == branch_id,
-        Stock.product_id == purchase_data.product_id
-    ).first()
+    # Update or create stock record
+    stock = None
+    if purchase_data.product_id:
+        stock = db.query(Stock).filter(
+            Stock.branch_id == branch_id,
+            Stock.product_id == purchase_data.product_id
+        ).first()
+    else:
+        # For SKU-based stock, find by sku or create generic
+        stock = db.query(Stock).filter(
+            Stock.branch_id == branch_id,
+            Stock.product_id.is_(None)
+        ).first()
     
     if stock:
         stock.quantity += quantity
@@ -138,7 +151,7 @@ def create_vat_purchase(
     else:
         stock = Stock(
             branch_id=branch_id,
-            product_id=purchase_data.product_id,
+            product_id=purchase_data.product_id,  # Can be None
             quantity=quantity,
             quantity_with_vat=quantity if vat_rate > 0 else Decimal('0'),
             quantity_without_vat=quantity if vat_rate == 0 else Decimal('0'),
@@ -155,6 +168,7 @@ def create_vat_purchase(
 def get_vat_purchases(
     product_id: Optional[int] = None,
     product_group: Optional[str] = None,
+    sku: Optional[str] = None,
     status: Optional[VATStatus] = None,
     from_date: Optional[date] = None,
     to_date: Optional[date] = None,
@@ -168,6 +182,8 @@ def get_vat_purchases(
     
     if product_id:
         query = query.filter(VATPurchase.product_id == product_id)
+    if sku:
+        query = query.filter(VATPurchase.sku == sku)
     if product_group:
         query = query.filter(VATPurchase.product_group == product_group)
     if status:
@@ -217,7 +233,7 @@ def update_vat_purchase(
     return purchase
 
 
-# ==================== VAT SALE ENDPOINTS (Salesman accessible) ====================
+# ==================== VAT SALE ENDPOINTS ====================
 
 @router.post("/sales", response_model=VATSaleResponse)
 def create_vat_sale(
@@ -304,7 +320,7 @@ def create_vat_sale(
         movement_type="vat_sale_out",
         with_vat=True,
         reference_id=vat_sale.id,
-        notes=f"VAT Sale #{vat_sale.vat_sale_number} - Price: {selling_price}"
+        notes=f"VAT Sale #{vat_sale.vat_sale_number} - SKU: {vat_purchase.sku} - Price: {selling_price}"
     )
     db.add(stock_movement)
     
@@ -329,6 +345,8 @@ def create_vat_sale(
 @router.get("/sales", response_model=List[VATSaleResponse])
 def get_vat_sales(
     product_id: Optional[int] = None,
+    sku: Optional[str] = None,
+    product_group: Optional[str] = None,
     vat_purchase_id: Optional[int] = None,
     from_date: Optional[date] = None,
     to_date: Optional[date] = None,
@@ -344,6 +362,10 @@ def get_vat_sales(
     
     if product_id:
         query = query.filter(VATSale.product_id == product_id)
+    if sku:
+        query = query.filter(VATSale.sku == sku)
+    if product_group:
+        query = query.filter(VATSale.product_group == product_group)
     if vat_purchase_id:
         query = query.filter(VATSale.vat_purchase_id == vat_purchase_id)
     if from_date:
@@ -373,24 +395,32 @@ def get_vat_sale(
     return sale
 
 
-# ==================== STOCK TRACKING ENDPOINTS (Salesman accessible) ====================
+# ==================== STOCK TRACKING ENDPOINTS ====================
 
 @router.get("/stock", response_model=List[VATPurchaseStockResponse])
 def get_vat_stock_by_product(
-    product_id: int,
+    product_id: Optional[int] = None,
+    sku: Optional[str] = None,
+    product_group: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_salesman)
 ):
-    """Get available stock from VAT purchases for a product (FIFO tracking)"""
+    """Get available stock from VAT purchases for a product or SKU group"""
     
     query = db.query(VATPurchase).filter(
-        VATPurchase.product_id == product_id,
         VATPurchase.current_stock > 0,
         VATPurchase.status == VATStatus.PENDING.value
     )
     
     if not current_user.is_admin():
         query = query.filter(VATPurchase.branch_id == current_user.branch_id)
+    
+    if product_id:
+        query = query.filter(VATPurchase.product_id == product_id)
+    if sku:
+        query = query.filter(VATPurchase.sku == sku)
+    if product_group:
+        query = query.filter(VATPurchase.product_group == product_group)
     
     purchases = query.order_by(VATPurchase.purchase_date.asc()).all()
     return purchases
@@ -419,12 +449,13 @@ def get_vat_stock_summary(
         "total_stock_value": float(total_stock_value),
         "total_stock_vat": float(total_stock_vat),
         "total_stock_with_vat": float(total_stock_value + total_stock_vat),
-        "unique_products": len(set(p.product_id for p in purchases)),
+        "unique_products": len(set(p.product_id for p in purchases if p.product_id)),
+        "unique_sku_groups": len(set(p.sku for p in purchases if p.sku)),
         "purchase_batches": len(purchases)
     }
 
 
-# ==================== VAT SUMMARY ENDPOINTS (Admin only) ====================
+# ==================== VAT SUMMARY ENDPOINTS ====================
 
 @router.post("/summaries/generate", response_model=VATSummaryResponse)
 def generate_vat_summary(
@@ -651,7 +682,7 @@ def get_current_vat_rate(
     return {"vat_rate": float(current_rate.vat_rate), "effective_from": current_rate.effective_from}
 
 
-# ==================== VAT REPORT ENDPOINTS (Admin only) ====================
+# ==================== VAT REPORT ENDPOINTS ====================
 
 @router.get("/reports/period", response_model=VATPeriodReport)
 def get_vat_period_report(

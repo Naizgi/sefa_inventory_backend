@@ -181,7 +181,7 @@ class User(UserBase):
 # ==================== STOCK SCHEMAS (UPDATED WITH VAT BREAKDOWN) ====================
 class StockBase(BaseModel):
     branch_id: int
-    product_id: int
+    product_id: Optional[int] = None  # Made optional for SKU-based stock
     quantity: float = Field(0, ge=0)
     quantity_with_vat: float = Field(0, ge=0, description="Stock quantity purchased with VAT")
     quantity_without_vat: float = Field(0, ge=0, description="Stock quantity purchased without VAT")
@@ -203,7 +203,7 @@ class Stock(StockBase):
         from_attributes = True
 
 class StockResponse(BaseModel):
-    product_id: int
+    product_id: Optional[int] = None
     product_name: str
     product_sku: str
     quantity: float
@@ -216,7 +216,7 @@ class StockResponse(BaseModel):
 # ==================== STOCK MOVEMENT SCHEMAS ====================
 class StockMovementBase(BaseModel):
     branch_id: int
-    product_id: int
+    product_id: Optional[int] = None  # Made optional for SKU-based stock
     change_qty: float
     movement_type: str
     with_vat: bool = Field(True, description="Whether this movement was with VAT")
@@ -899,7 +899,8 @@ class VATStatus(str, Enum):
 
 
 class VATPurchaseBase(BaseModel):
-    product_id: int
+    product_id: Optional[int] = None  # CHANGED: Made optional
+    sku: Optional[str] = Field(None, max_length=100)  # ADDED: SKU field
     quantity: float = Field(..., gt=0)
     unit_cost: float = Field(..., gt=0)
     vat_rate: float = Field(default=15.0, ge=0, le=100)
@@ -907,6 +908,7 @@ class VATPurchaseBase(BaseModel):
     invoice_number: Optional[str] = Field(None, max_length=100)
     purchase_date: datetime
     product_group: Optional[str] = Field(None, max_length=100)
+    product_name: Optional[str] = Field(None, max_length=255)  # ADDED: Product name
     notes: Optional[str] = None
 
 
@@ -928,8 +930,8 @@ class VATPurchaseResponse(VATPurchaseBase):
     vat_number: str
     branch_id: int
     branch_name: Optional[str] = None
-    product_name: str
-    sku: str
+    product_name: Optional[str] = None
+    sku: Optional[str] = None
     total_cost: float
     vat_amount: float
     total_with_vat: float
@@ -944,7 +946,7 @@ class VATPurchaseResponse(VATPurchaseBase):
     status: VATStatus
     created_at: datetime
     updated_at: Optional[datetime] = None
-    created_by: int  # CHANGED: from str to int
+    created_by: int
     created_by_name: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
@@ -954,10 +956,10 @@ class VATPurchaseStockResponse(BaseModel):
     """Response for stock tracking from VAT purchases"""
     id: int
     vat_number: str
-    product_id: int
-    product_name: str
+    product_id: Optional[int] = None
+    product_name: Optional[str] = None
     product_group: Optional[str]
-    sku: str
+    sku: Optional[str] = None
     current_stock: float
     unit_cost: float
     current_value: float
@@ -984,10 +986,10 @@ class VATSaleResponse(VATSaleBase):
     vat_sale_number: str
     branch_id: int
     branch_name: Optional[str] = None
-    product_id: int
-    product_name: str
+    product_id: Optional[int] = None
+    product_name: Optional[str] = None
     product_group: Optional[str] = None
-    sku: str
+    sku: Optional[str] = None
     unit_cost: float
     selling_price_with_vat: float
     vat_rate: float
@@ -1001,7 +1003,7 @@ class VATSaleResponse(VATSaleBase):
     invoice_number: Optional[str] = None
     sale_date: datetime
     created_at: datetime
-    created_by: int  # CHANGED: from str to int
+    created_by: int
     created_by_name: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
@@ -1064,7 +1066,7 @@ class VATSummaryResponse(VATSummaryBase):
     
     created_at: datetime
     updated_at: Optional[datetime] = None
-    created_by: Optional[int] = None  # CHANGED: from Optional[str] to Optional[int]
+    created_by: Optional[int] = None
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -1082,7 +1084,7 @@ class VATRateHistoryCreate(VATRateHistoryBase):
 
 class VATRateHistoryResponse(VATRateHistoryBase):
     id: int
-    created_by: int  # CHANGED: from str to int
+    created_by: int
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
