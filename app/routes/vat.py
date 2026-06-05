@@ -37,6 +37,14 @@ def generate_vat_number(prefix: str = "VAT", branch_id: int = None) -> str:
     return f"{prefix}-{timestamp}"
 
 
+def generate_sale_number(branch_id: int = None) -> str:
+    """Generate a simple sale number for auto-created sales"""
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    if branch_id:
+        return f"SALE-{branch_id}-{timestamp}"
+    return f"SALE-{timestamp}"
+
+
 def update_vat_purchase_stock(vat_purchase: VATPurchase, db: Session):
     """Update current stock and value for a VAT purchase"""
     vat_purchase.current_stock = vat_purchase.quantity - vat_purchase.sold_quantity
@@ -239,7 +247,8 @@ def create_vat_sale(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_salesman)
 ):
-    """Create a VAT sale record (when selling from stock)"""
+    """Create a VAT sale record (when selling from stock)
+       If sale_id is not provided, it will auto-create a regular sale."""
     
     vat_purchase = db.query(VATPurchase).filter(
         VATPurchase.id == sale_data.vat_purchase_id
@@ -257,13 +266,42 @@ def create_vat_sale(
             detail=f"Insufficient stock. Available: {vat_purchase.current_stock}"
         )
     
-    sale = db.query(Sale).filter(Sale.id == sale_data.sale_id).first()
-    if not sale:
-        raise HTTPException(status_code=404, detail="Sale not found")
-    
-    sale_item = None
-    if sale_data.sale_item_id:
-        sale_item = db.query(SaleItem).filter(SaleItem.id == sale_data.sale_item_id).first()
+    # Check if sale_id is provided, if not, create a regular sale automatically
+    sale = None
+    if sale_data.sale_id:
+        sale = db.query(Sale).filter(Sale.id == sale_data.sale_id).first()
+        if not sale:
+            raise HTTPException(status_code=404, detail="Sale not found")
+    else:
+        # Auto-create a regular sale for this VAT sale
+        branch_id = current_user.branch_id or vat_purchase.branch_id
+        total_amount = float(quantity * selling_price)
+        
+        sale = Sale(
+            invoice_number=generate_sale_number(branch_id),
+            branch_id=branch_id,
+            user_id=current_user.id,
+            customer_name=sale_data.customer_name or "Walk-in Customer",
+            customer_phone=None,
+            customer_email=None,
+            subtotal=Decimal(str(total_amount)),
+            tax_amount=Decimal('0'),
+            tax_rate=Decimal('0'),
+            discount_amount=Decimal('0'),
+            discount_type="fixed",
+            shipping_cost=Decimal('0'),
+            total_amount=Decimal(str(total_amount)),
+            total_cost=quantity * vat_purchase.unit_cost,
+            payment_method="cash",
+            bank_account_id=None,
+            transaction_reference=None,
+            status="completed",
+            refund_amount=Decimal('0'),
+            refund_status="none",
+            notes=sale_data.notes
+        )
+        db.add(sale)
+        db.flush()  # Get the sale ID without committing yet
     
     vat_calc = calculate_vat_amount(
         float(quantity * selling_price), 
@@ -278,7 +316,7 @@ def create_vat_sale(
     
     vat_sale = VATSale(
         vat_sale_number=generate_vat_number("VAT-SALE", sale.branch_id),
-        sale_id=sale_data.sale_id,
+        sale_id=sale.id,
         sale_item_id=sale_data.sale_item_id,
         vat_purchase_id=sale_data.vat_purchase_id,
         branch_id=sale.branch_id,
@@ -409,7 +447,7 @@ def get_vat_stock_by_product(
     # Filter by status 'paid' and current_stock > 0
     query = db.query(VATPurchase).filter(
         VATPurchase.current_stock > 0,
-        VATPurchase.status == 'paid'  # Changed from 'pending' to 'paid'
+        VATPurchase.status == 'paid'
     )
     
     if not current_user.is_admin():
@@ -463,7 +501,7 @@ def get_vat_stock_summary(
     
     query = db.query(VATPurchase).filter(
         VATPurchase.current_stock > 0,
-        VATPurchase.status == 'paid'  # Changed to 'paid'
+        VATPurchase.status == 'paid'
     )
     
     if not current_user.is_admin():
