@@ -76,12 +76,9 @@ def create_vat_purchase(
     total_cost = quantity * unit_cost
     vat_calc = calculate_vat_amount(float(total_cost), float(vat_rate))
     
-    # Calculate selling price (15% markup by default)
-    selling_price_calc = calculate_selling_price(
-        float(unit_cost), 
-        markup_percentage=15.0, 
-        vat_rate=float(vat_rate)
-    )
+    # Calculate selling price as unit_cost / 0.85 (approx 17.65% markup)
+    selling_price_excl_vat = float(unit_cost) / 0.85
+    selling_price_incl_vat = selling_price_excl_vat * (1 + float(vat_rate) / 100)
     
     # Use product_name from product_group if not provided
     product_name = purchase_data.product_name or purchase_data.product_group or "General Stock"
@@ -101,13 +98,14 @@ def create_vat_purchase(
         vat_rate=vat_rate,
         vat_amount=Decimal(str(vat_calc["vat_amount"])),
         total_with_vat=Decimal(str(vat_calc["incl_vat"])),
-        calculated_selling_price=Decimal(str(selling_price_calc["selling_price_excl_vat"])),
-        calculated_selling_price_with_vat=Decimal(str(selling_price_calc["selling_price_incl_vat"])),
+        calculated_selling_price=Decimal(str(selling_price_excl_vat)),
+        calculated_selling_price_with_vat=Decimal(str(selling_price_incl_vat)),
         current_stock=quantity,
         supplier_name=purchase_data.supplier_name,
         invoice_number=purchase_data.invoice_number,
         purchase_date=purchase_data.purchase_date,
         notes=purchase_data.notes,
+        status='paid',  # Set status to 'paid' for stock that's ready to sell
         created_by=current_user.id
     )
     
@@ -169,7 +167,7 @@ def get_vat_purchases(
     product_id: Optional[int] = None,
     product_group: Optional[str] = None,
     sku: Optional[str] = None,
-    status: Optional[VATStatus] = None,
+    status: Optional[str] = None,
     from_date: Optional[date] = None,
     to_date: Optional[date] = None,
     db: Session = Depends(get_db),
@@ -405,12 +403,13 @@ def get_vat_stock_by_product(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_salesman)
 ):
-    """Get available stock from VAT purchases for a product or SKU group.
-       If no filters provided, returns all available stock."""
+    """Get available stock from PAID VAT purchases for a product or SKU group.
+       Only shows purchases with status 'paid' (fully paid) and positive stock."""
     
+    # Filter by status 'paid' and current_stock > 0
     query = db.query(VATPurchase).filter(
         VATPurchase.current_stock > 0,
-        VATPurchase.status == VATStatus.PENDING.value
+        VATPurchase.status == 'paid'  # Changed from 'pending' to 'paid'
     )
     
     if not current_user.is_admin():
@@ -430,6 +429,9 @@ def get_vat_stock_by_product(
     # Convert to response format
     stock_items = []
     for p in purchases:
+        # Calculate selling price as unit_cost / 0.85 (approx 17.65% markup)
+        selling_price_excl_vat = float(p.unit_cost) / 0.85
+        
         stock_items.append({
             "id": p.id,
             "vat_number": p.vat_number,
@@ -442,10 +444,12 @@ def get_vat_stock_by_product(
             "current_value": float(p.current_value),
             "purchase_date": p.purchase_date,
             "supplier_name": p.supplier_name,
-            "calculated_selling_price": float(p.calculated_selling_price),
+            "calculated_selling_price": selling_price_excl_vat,
             "vat_rate": float(p.vat_rate),
             "status": p.status
         })
+    
+    print(f"Found {len(stock_items)} stock items from PAID purchases for user {current_user.id}")
     
     return stock_items
 
@@ -455,9 +459,12 @@ def get_vat_stock_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_salesman)
 ):
-    """Get summary of all VAT stock"""
+    """Get summary of all VAT stock from PAID purchases only"""
     
-    query = db.query(VATPurchase).filter(VATPurchase.current_stock > 0)
+    query = db.query(VATPurchase).filter(
+        VATPurchase.current_stock > 0,
+        VATPurchase.status == 'paid'  # Changed to 'paid'
+    )
     
     if not current_user.is_admin():
         query = query.filter(VATPurchase.branch_id == current_user.branch_id)
@@ -476,6 +483,59 @@ def get_vat_stock_summary(
         "unique_products": len(set(p.product_id for p in purchases if p.product_id)),
         "unique_sku_groups": len(set(p.sku for p in purchases if p.sku)),
         "purchase_batches": len(purchases)
+    }
+
+
+@router.get("/stock/debug")
+def debug_vat_stock(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Debug endpoint to check what VAT purchases exist"""
+    
+    # Get all VAT purchases
+    all_purchases = db.query(VATPurchase).all()
+    
+    # Get purchases with current_stock > 0
+    purchases_with_stock = db.query(VATPurchase).filter(VATPurchase.current_stock > 0).all()
+    
+    # Get purchases by status
+    paid_purchases = db.query(VATPurchase).filter(VATPurchase.status == 'paid').all()
+    pending_purchases = db.query(VATPurchase).filter(VATPurchase.status == 'pending').all()
+    completed_purchases = db.query(VATPurchase).filter(VATPurchase.status == 'completed').all()
+    null_status = db.query(VATPurchase).filter(VATPurchase.status.is_(None)).all()
+    
+    # Get paid purchases with stock > 0 (what should show in POS)
+    available_stock = db.query(VATPurchase).filter(
+        VATPurchase.status == 'paid',
+        VATPurchase.current_stock > 0
+    ).all()
+    
+    return {
+        "total_vat_purchases": len(all_purchases),
+        "purchases_with_positive_stock": len(purchases_with_stock),
+        "purchases_with_status_paid": len(paid_purchases),
+        "purchases_with_status_pending": len(pending_purchases),
+        "purchases_with_status_completed": len(completed_purchases),
+        "purchases_with_null_status": len(null_status),
+        "available_for_sale (paid + stock>0)": len(available_stock),
+        "all_purchases": [
+            {
+                "id": p.id,
+                "vat_number": p.vat_number,
+                "product_name": p.product_name,
+                "current_stock": float(p.current_stock),
+                "quantity": float(p.quantity),
+                "sold_quantity": float(p.sold_quantity),
+                "status": p.status,
+                "unit_cost": float(p.unit_cost),
+                "selling_price": float(p.calculated_selling_price) if p.calculated_selling_price else None,
+                "branch_id": p.branch_id,
+                "product_group": p.product_group,
+                "sku": p.sku
+            }
+            for p in all_purchases[:20]
+        ]
     }
 
 
@@ -578,7 +638,7 @@ def generate_vat_summary(
         net_vat=net_vat,
         total_profit_excl_vat=total_profit,
         average_profit_margin=Decimal(str(avg_profit_margin)),
-        status=VATStatus.PENDING.value,
+        status='pending',
         created_by=current_user.id
     )
     
@@ -597,7 +657,7 @@ def generate_vat_summary(
 @router.get("/summaries", response_model=List[VATSummaryResponse])
 def get_vat_summaries(
     year: Optional[int] = None,
-    status: Optional[VATStatus] = None,
+    status: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
@@ -886,7 +946,7 @@ def get_vat_dashboard(
     ytd_sale_vat = sum(s.vat_amount for s in year_to_date_sales)
     
     pending_returns = db.query(VATSummary).filter(
-        VATSummary.status == VATStatus.PENDING.value
+        VATSummary.status == 'pending'
     ).count()
     
     current_rate = db.query(VATRateHistory).filter(
