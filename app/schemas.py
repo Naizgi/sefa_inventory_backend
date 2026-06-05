@@ -969,8 +969,10 @@ class VATPurchaseStockResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# ==================== FIXED: VAT SALE SCHEMAS - sale_id is now optional ====================
+
 class VATSaleBase(BaseModel):
-    sale_id: int
+    sale_id: Optional[int] = None  # CHANGED: Made optional for auto-creation
     sale_item_id: Optional[int] = None
     vat_purchase_id: int
     quantity: float = Field(..., gt=0)

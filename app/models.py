@@ -206,7 +206,7 @@ class Stock(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)  # CHANGED: Made nullable for SKU-based stock
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
     quantity = Column(DECIMAL(12, 2), default=0)
     quantity_with_vat = Column(DECIMAL(12, 2), default=0)
     quantity_without_vat = Column(DECIMAL(12, 2), default=0)
@@ -515,7 +515,7 @@ class StockMovement(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)  # CHANGED: Made nullable for SKU-based stock
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     change_qty = Column(DECIMAL(12, 2), nullable=False)
     movement_type = Column(String(50), nullable=False)
@@ -681,11 +681,10 @@ class VATPurchase(Base):
     purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     
-    # CHANGED: Made product_id nullable for SKU-based purchases
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)  # Changed from nullable=False
-    product_name = Column(String(255), nullable=True)  # Changed from nullable=False
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
+    product_name = Column(String(255), nullable=True)
     product_group = Column(String(100), nullable=True)
-    sku = Column(String(100), nullable=True)  # Changed from nullable=False
+    sku = Column(String(100), nullable=True)
     
     quantity = Column(DECIMAL(12, 2), nullable=False)
     unit_cost = Column(DECIMAL(12, 2), nullable=False)
@@ -732,20 +731,22 @@ class VATPurchase(Base):
     )
 
 
+# ==================== FIXED: VAT SALE MODEL - sale_id is now nullable ====================
 class VATSale(Base):
     __tablename__ = "vat_sales"
     
     id = Column(Integer, primary_key=True, index=True)
     vat_sale_number = Column(String(50), unique=True, nullable=False, index=True)
-    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False)
+    # FIXED: Made sale_id nullable to allow auto-creation of sales
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True)  # CHANGED: nullable=True
     sale_item_id = Column(Integer, ForeignKey("sale_items.id"), nullable=True)
     vat_purchase_id = Column(Integer, ForeignKey("vat_purchases.id"), nullable=False)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)  # Changed to nullable
-    product_name = Column(String(255), nullable=True)  # Changed to nullable
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
+    product_name = Column(String(255), nullable=True)
     product_group = Column(String(100), nullable=True)
-    sku = Column(String(100), nullable=True)  # Changed to nullable
+    sku = Column(String(100), nullable=True)
     
     quantity = Column(DECIMAL(12, 2), nullable=False)
     unit_cost = Column(DECIMAL(12, 2), nullable=False)
