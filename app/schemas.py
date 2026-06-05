@@ -969,7 +969,7 @@ class VATPurchaseStockResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ==================== FIXED: VAT SALE SCHEMAS - sale_id is now optional ====================
+# ==================== FIXED: VAT SALE SCHEMAS - sale_id is now optional, added customer_name and notes ====================
 
 class VATSaleBase(BaseModel):
     sale_id: Optional[int] = None  # CHANGED: Made optional for auto-creation
@@ -977,6 +977,8 @@ class VATSaleBase(BaseModel):
     vat_purchase_id: int
     quantity: float = Field(..., gt=0)
     selling_price: float = Field(..., gt=0)  # Per unit excl VAT
+    customer_name: Optional[str] = Field(None, max_length=255)  # ADDED: Customer name
+    notes: Optional[str] = None  # ADDED: Notes
 
 
 class VATSaleCreate(VATSaleBase):
@@ -1001,7 +1003,6 @@ class VATSaleResponse(VATSaleBase):
     cost_of_goods_sold: float
     profit: float
     profit_margin: float
-    customer_name: Optional[str] = None
     invoice_number: Optional[str] = None
     sale_date: datetime
     created_at: datetime
@@ -1039,8 +1040,7 @@ class VATSummaryResponse(VATSummaryBase):
     
     # Purchase totals
     total_purchases_excl_vat: float
-    total_purchase_vat: float
-    total_purchases_incl_vat: float
+    total_purchase_vat: float    total_purchases_incl_vat: float
     purchase_count: int
     purchase_by_group: Optional[dict] = None
     
