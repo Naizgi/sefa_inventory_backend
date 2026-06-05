@@ -405,7 +405,8 @@ def get_vat_stock_by_product(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_salesman)
 ):
-    """Get available stock from VAT purchases for a product or SKU group"""
+    """Get available stock from VAT purchases for a product or SKU group.
+       If no filters provided, returns all available stock."""
     
     query = db.query(VATPurchase).filter(
         VATPurchase.current_stock > 0,
@@ -415,6 +416,7 @@ def get_vat_stock_by_product(
     if not current_user.is_admin():
         query = query.filter(VATPurchase.branch_id == current_user.branch_id)
     
+    # Apply filters only if provided
     if product_id:
         query = query.filter(VATPurchase.product_id == product_id)
     if sku:
@@ -422,8 +424,30 @@ def get_vat_stock_by_product(
     if product_group:
         query = query.filter(VATPurchase.product_group == product_group)
     
+    # Order by purchase date for FIFO
     purchases = query.order_by(VATPurchase.purchase_date.asc()).all()
-    return purchases
+    
+    # Convert to response format
+    stock_items = []
+    for p in purchases:
+        stock_items.append({
+            "id": p.id,
+            "vat_number": p.vat_number,
+            "product_id": p.product_id,
+            "product_name": p.product_name,
+            "product_group": p.product_group,
+            "sku": p.sku,
+            "current_stock": float(p.current_stock),
+            "unit_cost": float(p.unit_cost),
+            "current_value": float(p.current_value),
+            "purchase_date": p.purchase_date,
+            "supplier_name": p.supplier_name,
+            "calculated_selling_price": float(p.calculated_selling_price),
+            "vat_rate": float(p.vat_rate),
+            "status": p.status
+        })
+    
+    return stock_items
 
 
 @router.get("/stock-summary")
