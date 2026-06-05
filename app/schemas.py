@@ -1040,7 +1040,8 @@ class VATSummaryResponse(VATSummaryBase):
     
     # Purchase totals
     total_purchases_excl_vat: float
-    total_purchase_vat: float    total_purchases_incl_vat: float
+    total_purchase_vat: float    
+    total_purchases_incl_vat: float
     purchase_count: int
     purchase_by_group: Optional[dict] = None
     
