@@ -3,8 +3,6 @@ from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from datetime import datetime, date
 from typing import Optional, List, Any
 from decimal import Decimal
-# Remove this import - we'll define it in schemas instead of importing from models
-# from app.models import DamagedGoodsStatus
 
 # ==================== ENUMS ====================
 class PurchaseStatus(str, Enum):
@@ -59,6 +57,26 @@ class DamagedGoodsStatus(str, Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
     PROCESSED = "processed"
+
+# ==================== WALLET ENUMS ====================
+class WalletType(str, Enum):
+    VAT = "vat"
+    REGULAR = "regular"
+
+class WalletTransactionType(str, Enum):
+    DEPOSIT = "deposit"           # Money added to wallet
+    WITHDRAWAL = "withdrawal"      # Money taken out
+    PURCHASE = "purchase"          # Money spent on purchase order
+    RESTOCK = "restock"            # Money spent on restocking
+    REFUND = "refund"              # Money refunded to customer
+    ADJUSTMENT = "adjustment"      # Manual adjustment
+    TRANSFER = "transfer"          # Transfer between wallets
+
+class WalletTransactionStatus(str, Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
 
 # ==================== BRANCH SCHEMAS ====================
 class BranchBase(BaseModel):
@@ -181,7 +199,7 @@ class User(UserBase):
 # ==================== STOCK SCHEMAS (UPDATED WITH VAT BREAKDOWN) ====================
 class StockBase(BaseModel):
     branch_id: int
-    product_id: Optional[int] = None  # Made optional for SKU-based stock
+    product_id: Optional[int] = None
     quantity: float = Field(0, ge=0)
     quantity_with_vat: float = Field(0, ge=0, description="Stock quantity purchased with VAT")
     quantity_without_vat: float = Field(0, ge=0, description="Stock quantity purchased without VAT")
@@ -210,13 +228,13 @@ class StockResponse(BaseModel):
     stock_with_vat: float = Field(0, description="Stock quantity with VAT")
     stock_without_vat: float = Field(0, description="Stock quantity without VAT")
     reorder_level: float
-    status: str  # "normal", "low", "out_of_stock"
+    status: str
 
 
 # ==================== STOCK MOVEMENT SCHEMAS ====================
 class StockMovementBase(BaseModel):
     branch_id: int
-    product_id: Optional[int] = None  # Made optional for SKU-based stock
+    product_id: Optional[int] = None
     change_qty: float
     movement_type: str
     with_vat: bool = Field(True, description="Whether this movement was with VAT")
@@ -293,7 +311,6 @@ class SaleResponse(BaseModel):
     customer_phone: Optional[str]
     customer_email: Optional[str]
     
-    # Financial fields
     subtotal: float
     tax_amount: float
     tax_rate: float
@@ -303,18 +320,15 @@ class SaleResponse(BaseModel):
     total_amount: float
     total_cost: float
     
-    # Payment fields
     payment_method: PaymentMethod
     bank_account_id: Optional[int]
     bank_account_details: Optional[BankAccount] = None
     transaction_reference: Optional[str]
     
-    # Status fields
     status: SaleStatus
     refund_amount: float
     refund_status: RefundStatus
     
-    # Timestamps
     created_at: datetime
     updated_at: Optional[datetime]
     notes: Optional[str]
@@ -363,22 +377,18 @@ class RefundResponse(BaseModel):
     user_name: Optional[str] = None
     customer_name: Optional[str]
     
-    # Refund details
     refund_amount: float
     refund_reason: str
     refund_method: PaymentMethod
     
-    # Bank transfer details
     bank_account_id: Optional[int]
     bank_account_details: Optional[BankAccount] = None
     transaction_reference: Optional[str]
     
-    # Status
-    status: str  # pending, approved, completed, rejected
+    status: str
     approved_by: Optional[str]
     approved_at: Optional[datetime]
     
-    # Timestamps
     created_at: datetime
     completed_at: Optional[datetime]
     notes: Optional[str]
@@ -392,7 +402,7 @@ class RefundApprove(BaseModel):
     notes: Optional[str] = None
 
 
-# ==================== LEGACY SALE SCHEMAS (Keep for backward compatibility) ====================
+# ==================== LEGACY SALE SCHEMAS ====================
 class LegacySaleItemCreate(BaseModel):
     product_id: int
     quantity: float = Field(..., gt=0)
@@ -514,7 +524,7 @@ class TicketSummary(BaseModel):
     ticket_utilization_rate: float = 0
 
 
-# ==================== PURCHASE ORDER SCHEMAS (UPDATED WITH VAT AND BANK ACCOUNT) ====================
+# ==================== PURCHASE ORDER SCHEMAS ====================
 class PurchaseOrderItemBase(BaseModel):
     product_id: int
     quantity_ordered: Decimal = Field(gt=0)
@@ -536,16 +546,15 @@ class PurchaseOrderItemResponse(PurchaseOrderItemBase):
 class PurchaseOrderBase(BaseModel):
     supplier: str
     expected_delivery_date: Optional[date] = None
-    vat_rate: Optional[float] = Field(default=None, ge=0, le=100, description="VAT rate percentage (e.g., 15 for 15%). If null or 0, no VAT applied.")
-    tax_amount: Decimal = Field(default=0, ge=0, description="Legacy tax amount. If vat_rate is provided, this is calculated automatically.")
+    vat_rate: Optional[float] = Field(default=None, ge=0, le=100)
+    tax_amount: Decimal = Field(default=0, ge=0)
     shipping_cost: Decimal = Field(default=0, ge=0)
     discount_amount: Decimal = Field(default=0, ge=0)
     notes: Optional[str] = None
     
-    # NEW: Bank Account Fields
-    bank_account_id: Optional[int] = Field(None, description="Bank account used for payment")
-    payment_reference: Optional[str] = Field(None, max_length=100, description="Check/Transaction number")
-    payment_date: Optional[date] = Field(None, description="Date of payment")
+    bank_account_id: Optional[int] = None
+    payment_reference: Optional[str] = None
+    payment_date: Optional[date] = None
 
 class PurchaseOrderCreate(PurchaseOrderBase):
     items: List[PurchaseOrderItemCreate]
@@ -554,7 +563,6 @@ class PurchaseOrderUpdate(BaseModel):
     status: Optional[PurchaseStatus] = None
     actual_delivery_date: Optional[date] = None
     notes: Optional[str] = None
-    # NEW: Bank Account Fields for update
     bank_account_id: Optional[int] = None
     payment_reference: Optional[str] = None
     payment_date: Optional[date] = None
@@ -567,15 +575,14 @@ class PurchaseOrderResponse(PurchaseOrderBase):
     actual_delivery_date: Optional[datetime] = None
     status: PurchaseStatus
     subtotal: Decimal
-    vat_rate: Decimal = Field(default=0, description="Applied VAT rate")
-    vat_amount: Decimal = Field(default=0, description="Calculated VAT amount")
+    vat_rate: Decimal = Field(default=0)
+    vat_amount: Decimal = Field(default=0)
     total_amount: Decimal
     items: List[PurchaseOrderItemResponse]
     created_by: str
     created_at: datetime
     updated_at: Optional[datetime] = None
     
-    # NEW: Bank Account Fields in response
     bank_account_id: Optional[int] = None
     bank_account_name: Optional[str] = None
     bank_name: Optional[str] = None
@@ -899,8 +906,8 @@ class VATStatus(str, Enum):
 
 
 class VATPurchaseBase(BaseModel):
-    product_id: Optional[int] = None  # CHANGED: Made optional
-    sku: Optional[str] = Field(None, max_length=100)  # ADDED: SKU field
+    product_id: Optional[int] = None
+    sku: Optional[str] = Field(None, max_length=100)
     quantity: float = Field(..., gt=0)
     unit_cost: float = Field(..., gt=0)
     vat_rate: float = Field(default=15.0, ge=0, le=100)
@@ -908,7 +915,7 @@ class VATPurchaseBase(BaseModel):
     invoice_number: Optional[str] = Field(None, max_length=100)
     purchase_date: datetime
     product_group: Optional[str] = Field(None, max_length=100)
-    product_name: Optional[str] = Field(None, max_length=255)  # ADDED: Product name
+    product_name: Optional[str] = Field(None, max_length=255)
     notes: Optional[str] = None
 
 
@@ -953,7 +960,6 @@ class VATPurchaseResponse(VATPurchaseBase):
 
 
 class VATPurchaseStockResponse(BaseModel):
-    """Response for stock tracking from VAT purchases"""
     id: int
     vat_number: str
     product_id: Optional[int] = None
@@ -969,16 +975,14 @@ class VATPurchaseStockResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ==================== FIXED: VAT SALE SCHEMAS - sale_id is now optional, added customer_name and notes ====================
-
 class VATSaleBase(BaseModel):
-    sale_id: Optional[int] = None  # CHANGED: Made optional for auto-creation
+    sale_id: Optional[int] = None
     sale_item_id: Optional[int] = None
     vat_purchase_id: int
     quantity: float = Field(..., gt=0)
-    selling_price: float = Field(..., gt=0)  # Per unit excl VAT
-    customer_name: Optional[str] = Field(None, max_length=255)  # ADDED: Customer name
-    notes: Optional[str] = None  # ADDED: Notes
+    selling_price: float = Field(..., gt=0)
+    customer_name: Optional[str] = Field(None, max_length=255)
+    notes: Optional[str] = None
 
 
 class VATSaleCreate(VATSaleBase):
@@ -998,7 +1002,7 @@ class VATSaleResponse(VATSaleBase):
     selling_price_with_vat: float
     vat_rate: float
     vat_amount: float
-    total_amount: float  # excl VAT
+    total_amount: float
     total_amount_with_vat: float
     cost_of_goods_sold: float
     profit: float
@@ -1013,7 +1017,7 @@ class VATSaleResponse(VATSaleBase):
 
 
 class VATSummaryBase(BaseModel):
-    summary_month: str  # Format: YYYY-MM
+    summary_month: str
     notes: Optional[str] = None
 
 
@@ -1038,30 +1042,25 @@ class VATSummaryResponse(VATSummaryBase):
     summary_year: int
     summary_month_num: int
     
-    # Purchase totals
     total_purchases_excl_vat: float
     total_purchase_vat: float    
     total_purchases_incl_vat: float
     purchase_count: int
     purchase_by_group: Optional[dict] = None
     
-    # Sale totals
     total_sales_excl_vat: float
     total_sale_vat: float
     total_sales_incl_vat: float
     sale_count: int
     sale_by_group: Optional[dict] = None
     
-    # VAT payable/receivable
     vat_payable: float
     vat_receivable: float
     net_vat: float
     
-    # Profit summary
     total_profit_excl_vat: float
     average_profit_margin: float
     
-    # Status
     status: VATStatus
     filed_date: Optional[datetime] = None
     payment_date: Optional[datetime] = None
@@ -1096,38 +1095,31 @@ class VATRateHistoryResponse(VATRateHistoryBase):
 # ==================== VAT REPORT SCHEMAS ====================
 
 class VATPeriodReport(BaseModel):
-    """VAT report for a specific period"""
     period_start: date
     period_end: date
     branch_id: Optional[int] = None
     branch_name: Optional[str] = None
     
-    # Purchase summary
     total_purchases: float
     total_purchase_vat: float
     purchases_by_group: dict
     
-    # Sale summary
     total_sales: float
     total_sale_vat: float
     sales_by_group: dict
     
-    # VAT calculation
     vat_payable: float
     vat_receivable: float
     net_vat_due: float
     
-    # Profit analysis
     gross_profit: float
     profit_margin: float
     
-    # Transactions
     purchase_transactions: List[VATPurchaseResponse] = []
     sale_transactions: List[VATSaleResponse] = []
 
 
 class VATProductGroupReport(BaseModel):
-    """VAT report grouped by product category"""
     product_group: str
     total_purchases_excl_vat: float
     total_purchase_vat: float
@@ -1141,7 +1133,6 @@ class VATProductGroupReport(BaseModel):
 
 
 class VATDashboardSummary(BaseModel):
-    """Dashboard summary for VAT"""
     current_month_summary: Optional[VATSummaryResponse] = None
     previous_month_summary: Optional[VATSummaryResponse] = None
     year_to_date_purchases: float
@@ -1153,10 +1144,111 @@ class VATDashboardSummary(BaseModel):
     top_product_groups_by_vat: List[VATProductGroupReport] = []
 
 
+# ==================== WALLET SCHEMAS ====================
+
+class WalletBase(BaseModel):
+    wallet_type: WalletType
+    currency: str = Field(default="ETB", min_length=3, max_length=3)
+
+class WalletCreate(WalletBase):
+    branch_id: int
+    initial_balance: float = Field(default=0, ge=0)
+
+class WalletUpdate(BaseModel):
+    is_active: Optional[bool] = None
+
+class WalletResponse(WalletBase):
+    id: int
+    branch_id: int
+    branch_name: Optional[str] = None
+    balance: float
+    is_active: bool
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WalletTransactionBase(BaseModel):
+    amount: float = Field(..., gt=0)
+    description: Optional[str] = None
+    reference_type: Optional[str] = None
+    reference_id: Optional[int] = None
+
+class WalletDeposit(WalletTransactionBase):
+    wallet_id: int
+
+class WalletWithdrawal(WalletTransactionBase):
+    wallet_id: int
+
+class WalletTransfer(BaseModel):
+    from_wallet_id: int
+    to_wallet_id: int
+    amount: float = Field(..., gt=0)
+    description: Optional[str] = None
+
+
+class WalletTransactionResponse(WalletTransactionBase):
+    id: int
+    transaction_number: str
+    wallet_id: int
+    transaction_type: str
+    amount: float
+    balance_before: float
+    balance_after: float
+    status: str
+    created_at: datetime
+    created_by: Optional[str] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WalletBalanceResponse(BaseModel):
+    vat_wallet: WalletResponse
+    regular_wallet: WalletResponse
+    total_balance: float
+
+
+class WalletSummaryResponse(BaseModel):
+    id: int
+    branch_id: int
+    branch_name: Optional[str] = None
+    summary_date: date
+    
+    opening_balance_vat: float
+    opening_balance_regular: float
+    
+    deposits_vat: float
+    deposits_regular: float
+    total_income_vat: float
+    total_income_regular: float
+    
+    purchase_expenses_vat: float
+    purchase_expenses_regular: float
+    restock_expenses_vat: float
+    restock_expenses_regular: float
+    refunds_vat: float
+    refunds_regular: float
+    withdrawals_vat: float
+    withdrawals_regular: float
+    total_expenses_vat: float
+    total_expenses_regular: float
+    
+    closing_balance_vat: float
+    closing_balance_regular: float
+    
+    net_profit_vat: float
+    net_profit_regular: float
+    total_profit: float
+    
+    created_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
 # ==================== VAT CALCULATION HELPERS ====================
 
 def calculate_vat_amount(amount: float, vat_rate: float = 15.0) -> dict:
-    """Calculate VAT amount and total including VAT"""
     vat_amount = amount * (vat_rate / 100)
     total_with_vat = amount + vat_amount
     return {
@@ -1168,18 +1260,11 @@ def calculate_vat_amount(amount: float, vat_rate: float = 15.0) -> dict:
 
 
 def calculate_selling_price(unit_cost: float, markup_percentage: float = 15.0, vat_rate: float = 15.0) -> dict:
-    """
-    Calculate selling price based on cost with markup and VAT
-    Formula: Selling Price (excl VAT) = Cost ÷ (1 - markup_percentage/100)
-    Then add VAT for final price
-    """
     if markup_percentage <= 0 or markup_percentage >= 100:
         markup_percentage = 15.0
     
-    # Calculate selling price excl VAT (cost divided by (1 - markup%))
     selling_price_excl_vat = unit_cost / (1 - (markup_percentage / 100))
     
-    # Calculate VAT
     vat_amount = selling_price_excl_vat * (vat_rate / 100)
     selling_price_incl_vat = selling_price_excl_vat + vat_amount
     
@@ -1196,7 +1281,6 @@ def calculate_selling_price(unit_cost: float, markup_percentage: float = 15.0, v
 
 
 def calculate_cogs_and_profit(quantity: float, unit_cost: float, selling_price_excl_vat: float) -> dict:
-    """Calculate Cost of Goods Sold and profit"""
     cogs = quantity * unit_cost
     total_revenue = quantity * selling_price_excl_vat
     profit = total_revenue - cogs

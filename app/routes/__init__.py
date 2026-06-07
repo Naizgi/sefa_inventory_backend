@@ -12,6 +12,7 @@ from .loan_routes import router as loan_router
 from .temp_items_routes import router as temp_items_router
 from .settings_router import router as settings_router
 from .vat import router as vat_router  # VAT tracking router
+from .wallet import router as wallet_router  # NEW: Wallet management router
 
 
 # Export all routers
@@ -30,4 +31,5 @@ __all__ = [
     'temp_items_router',
     'settings_router',
     'vat_router',
+    'wallet_router',  # NEW: Export wallet router
 ]

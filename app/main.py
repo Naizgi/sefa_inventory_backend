@@ -23,7 +23,8 @@ from app.routes import (
     loan_router, products_router, purchase_router, reports_router,
     sales_router, stock_router, temp_items_router, users_router
 )
-from app.routes.vat import router as vat_router # NEW: Import VAT router
+from app.routes.vat import router as vat_router
+from app.routes.wallet import router as wallet_router  # NEW: Import Wallet router
 
 # ==================== SCHEDULER ====================
 scheduler = BackgroundScheduler()
@@ -176,7 +177,8 @@ app.include_router(loan_router)
 app.include_router(purchase_router)
 app.include_router(temp_items_router)
 app.include_router(settings_router)
-app.include_router(vat_router)  # NEW: Include VAT router
+app.include_router(vat_router)  # VAT router
+app.include_router(wallet_router)  # NEW: Wallet router
 
 # ==================== TEST EMAIL ENDPOINT ====================
 @app.post("/api/test/email")
@@ -300,5 +302,50 @@ def vat_info(current_user: User = Depends(get_current_user)):
             {"path": "/api/vat/dashboard", "methods": ["GET"], "description": "VAT dashboard"},
             {"path": "/api/vat/calculate-selling-price", "methods": ["POST"], "description": "Calculate selling price from cost"},
             {"path": "/api/vat/calculate-vat", "methods": ["POST"], "description": "Calculate VAT amount"}
+        ]
+    }
+
+# ==================== WALLET ROUTES OVERVIEW ====================
+@app.get("/api/wallet/info")
+def wallet_info(current_user: User = Depends(get_current_user)):
+    """Get Wallet system information"""
+    return {
+        "module": "Wallet Management System",
+        "version": "1.0.0",
+        "description": "Manage wallets for VAT and regular stock operations",
+        "features": [
+            "Separate wallets for VAT and Regular stock",
+            "Track deposits and withdrawals",
+            "Auto-deduct when restocking and purchasing",
+            "Wallet transfer between accounts",
+            "Daily and monthly summaries",
+            "Real-time balance tracking",
+            "Profit/Loss calculation for wallet operations"
+        ],
+        "endpoints": [
+            {"path": "/api/wallet/create", "methods": ["POST"], "description": "Create a wallet for a branch"},
+            {"path": "/api/wallet/balances", "methods": ["GET"], "description": "Get wallet balances"},
+            {"path": "/api/wallet/deposit", "methods": ["POST"], "description": "Deposit money into wallet"},
+            {"path": "/api/wallet/withdraw", "methods": ["POST"], "description": "Withdraw money from wallet"},
+            {"path": "/api/wallet/transfer", "methods": ["POST"], "description": "Transfer between wallets"},
+            {"path": "/api/wallet/transactions", "methods": ["GET"], "description": "Get transaction history"},
+            {"path": "/api/wallet/process-restock/{product_id}", "methods": ["POST"], "description": "Auto-deduct when restocking"},
+            {"path": "/api/wallet/process-purchase/{purchase_order_id}", "methods": ["POST"], "description": "Auto-deduct for purchase orders"},
+            {"path": "/api/wallet/process-refund/{refund_id}", "methods": ["POST"], "description": "Auto-deduct for refunds"},
+            {"path": "/api/wallet/summary", "methods": ["GET"], "description": "Get daily wallet summary"},
+            {"path": "/api/wallet/summary/range", "methods": ["GET"], "description": "Get summaries for date range"}
+        ],
+        "transaction_types": [
+            {"type": "deposit", "description": "Money added to wallet"},
+            {"type": "withdrawal", "description": "Money taken out"},
+            {"type": "purchase", "description": "Money spent on purchase orders"},
+            {"type": "restock", "description": "Money spent on restocking"},
+            {"type": "refund", "description": "Money refunded to customer"},
+            {"type": "adjustment", "description": "Manual adjustment"},
+            {"type": "transfer", "description": "Transfer between wallets"}
+        ],
+        "wallets": [
+            {"name": "VAT Wallet", "description": "For VAT-tracked purchases and expenses"},
+            {"name": "Regular Wallet", "description": "For regular inventory purchases and restocking"}
         ]
     }
