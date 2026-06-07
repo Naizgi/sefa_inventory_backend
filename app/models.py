@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Float, Boolean, DateTime, ForeignKey, DECIMAL, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, Text, Float, Boolean, DateTime, Date, ForeignKey, DECIMAL, UniqueConstraint, Index
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -43,6 +43,7 @@ class PaymentMethod(str, enum.Enum):
     MOBILE_MONEY = "mobile_money"
     COUPON = "coupon"
     MIXED = "mixed"
+    ORIGINAL_METHOD = "original_method"
 
 class RefundStatus(str, enum.Enum):
     NONE = "none"
@@ -911,7 +912,7 @@ class WalletTransaction(Base):
     balance_after = Column(DECIMAL(15, 2), nullable=False)
     status = Column(String(50), default=WalletTransactionStatus.COMPLETED.value)
     
-    # Reference to related transactions (sales are NOT recorded here)
+    # Reference to related transactions
     reference_type = Column(String(50), nullable=True)  # 'purchase', 'restock', 'refund'
     reference_id = Column(Integer, nullable=True)
     
