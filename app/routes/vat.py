@@ -24,6 +24,10 @@ from app.utils.dependencies import (
     get_current_user, require_privileged, require_admin, require_salesman
 )
 
+# Import wallet functions
+from app.routes.wallet import get_or_create_wallet, process_wallet_transaction
+from app.models import WalletTransactionType
+
 router = APIRouter(prefix="/api/vat", tags=["VAT Tracking"])
 
 
@@ -61,7 +65,7 @@ def create_vat_purchase(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_privileged)
 ):
-    """Create a new VAT purchase record (when receiving stock)"""
+    """Create a new VAT purchase record (when receiving stock) with wallet deduction"""
     
     # Get branch for current user
     branch_id = current_user.branch_id
@@ -91,6 +95,34 @@ def create_vat_purchase(
     # Use product_name from product_group if not provided
     product_name = purchase_data.product_name or purchase_data.product_group or "General Stock"
     
+    # ==================== DEDUCT FROM VAT WALLET ====================
+    # Calculate total amount to deduct (total cost including VAT)
+    total_amount_to_deduct = total_cost
+    
+    try:
+        # Get VAT wallet for this branch
+        wallet = get_or_create_wallet(db, branch_id, "vat")
+        
+        # Process wallet transaction (deduct amount)
+        wallet_transaction = process_wallet_transaction(
+            db=db,
+            wallet_id=wallet.id,
+            transaction_type=WalletTransactionType.PURCHASE.value,
+            amount=total_amount_to_deduct,
+            description=f"VAT Purchase - SKU: {purchase_data.sku} - Supplier: {purchase_data.supplier_name} - Qty: {quantity}",
+            user_id=current_user.id,
+            reference_type="vat_purchase",
+            reference_id=None  # Will be updated after creating the purchase
+        )
+        print(f"✅ VAT Wallet deducted: {wallet_transaction.transaction_number} - Amount: {total_amount_to_deduct}")
+        
+    except Exception as wallet_error:
+        print(f"⚠️ VAT Wallet deduction failed: {wallet_error}")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Wallet deduction failed: {str(wallet_error)}. Insufficient funds or wallet inactive."
+        )
+    
     # Create VAT purchase record - product_id is now optional
     vat_purchase = VATPurchase(
         vat_number=generate_vat_number("VAT-PUR", branch_id),
@@ -118,6 +150,13 @@ def create_vat_purchase(
     )
     
     db.add(vat_purchase)
+    db.flush()  # Get the ID without committing yet
+    
+    # Update the wallet transaction with the reference ID
+    if wallet_transaction:
+        wallet_transaction.reference_id = vat_purchase.id
+        db.add(wallet_transaction)
+    
     db.commit()
     db.refresh(vat_purchase)
     
