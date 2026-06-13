@@ -1,3 +1,4 @@
+# app/routes/sales.py
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -11,19 +12,68 @@ from app.database import get_db
 from app.config import settings
 from app.models import (
     User, Sale, SaleItem, Product, Stock, StockMovement, Branch, 
-    BankAccount, Refund, RefundItem, SystemSetting
+    BankAccount, Refund, RefundItem, SystemSetting, Wallet
 )
 from app.schemas import (
     SaleResponse, SaleCreate, SaleItemResponse, 
     RefundCreate, RefundResponse, RefundApprove,
-    BankAccount as BankAccountSchema,
+    BankAccountResponse,
     BankAccountCreate,
     BankAccountUpdate
 )
 from app.utils.dependencies import get_current_user, require_admin
 from app.services import EmailService, AuthService
 
+# Import wallet functions
+from app.routes.wallet import get_or_create_wallet, process_wallet_transaction
+from app.models import WalletTransactionType
+
 router = APIRouter(prefix="/api/sales", tags=["Sales"])
+
+# ==================== PUBLIC BANK ACCOUNTS FOR POS ====================
+# This endpoint is completely public - no authentication required
+
+@router.get("/public-bank-accounts")
+def get_public_bank_accounts(
+    db: Session = Depends(get_db),
+):
+    """
+    Get bank accounts for POS system.
+    COMPLETELY PUBLIC - No authentication required.
+    This is used by the POS frontend for bank transfer payments.
+    """
+    try:
+        print("=" * 60)
+        print("🚀 PUBLIC BANK ACCOUNTS ENDPOINT (in sales.py) CALLED")
+        print("=" * 60)
+        
+        # Get all active bank accounts
+        accounts = db.query(BankAccount).filter(BankAccount.is_active == True).all()
+        
+        result = []
+        for acc in accounts:
+            result.append({
+                "id": acc.id,
+                "bank_name": acc.bank_name,
+                "branch_name": acc.branch_name or "",
+                "account_number": acc.account_number,
+                "account_name": acc.account_name,
+                "account_type": acc.account_type,
+                "currency": acc.currency,
+                "is_active": acc.is_active,
+                "is_primary": acc.is_primary,
+                "account_category": getattr(acc, 'account_category', 'regular')
+            })
+        
+        print(f"✅ Found {len(result)} bank accounts")
+        return result
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []  # Return empty array on error
+
 
 def generate_invoice_number(db: Session) -> str:
     """Generate a unique invoice number"""
@@ -73,9 +123,29 @@ def get_default_tax_rate(db: Session) -> float:
     ).first()
     return float(setting.value) if setting else 15.0
 
+def get_wallet_from_bank_account(db: Session, bank_account_id: int, branch_id: int) -> Optional[Wallet]:
+    """Get the wallet associated with a bank account"""
+    bank_account = db.query(BankAccount).filter(
+        BankAccount.id == bank_account_id,
+        BankAccount.branch_id == branch_id,
+        BankAccount.is_active == True
+    ).first()
+    
+    if not bank_account:
+        return None
+    
+    # Find wallet linked to this bank account
+    wallet = db.query(Wallet).filter(
+        Wallet.bank_account_id == bank_account_id,
+        Wallet.branch_id == branch_id,
+        Wallet.is_active == True
+    ).first()
+    
+    return wallet
+
 # ==================== BANK ACCOUNT CRUD OPERATIONS ====================
 
-@router.post("/bank-accounts", response_model=BankAccountSchema, status_code=status.HTTP_201_CREATED)
+@router.post("/bank-accounts", response_model=BankAccountResponse, status_code=status.HTTP_201_CREATED)
 def create_bank_account(
     account_data: BankAccountCreate,
     db: Session = Depends(get_db),
@@ -102,32 +172,44 @@ def create_bank_account(
         new_account = BankAccount(
             branch_id=account_data.branch_id,
             bank_name=account_data.bank_name,
+            branch_name=account_data.branch_name,
             account_number=account_data.account_number,
             account_name=account_data.account_name,
             account_type=account_data.account_type,
+            iban=account_data.iban,
+            swift_code=account_data.swift_code,
             currency=account_data.currency,
             is_active=account_data.is_active,
-            notes=account_data.notes
+            is_primary=account_data.is_primary,
+            notes=account_data.notes,
+            created_by=current_user.id
         )
         
         db.add(new_account)
         db.commit()
         db.refresh(new_account)
         
-        return {
-            "id": new_account.id,
-            "branch_id": new_account.branch_id,
-            "branch_name": branch.name,
-            "bank_name": new_account.bank_name,
-            "account_number": new_account.account_number,
-            "account_name": new_account.account_name,
-            "account_type": new_account.account_type,
-            "currency": new_account.currency,
-            "is_active": new_account.is_active,
-            "notes": new_account.notes,
-            "created_at": new_account.created_at,
-            "updated_at": new_account.updated_at
-        }
+        return BankAccountResponse(
+            id=new_account.id,
+            branch_id=new_account.branch_id,
+            bank_name=new_account.bank_name,
+            branch_name=new_account.branch_name,
+            account_number=new_account.account_number,
+            account_name=new_account.account_name,
+            account_type=new_account.account_type,
+            iban=new_account.iban,
+            swift_code=new_account.swift_code,
+            currency=new_account.currency,
+            current_balance=float(new_account.current_balance),
+            is_active=new_account.is_active,
+            is_primary=new_account.is_primary,
+            last_reconciled_at=new_account.last_reconciled_at,
+            last_reconciled_balance=float(new_account.last_reconciled_balance) if new_account.last_reconciled_balance else None,
+            notes=new_account.notes,
+            created_by=new_account.created_by,
+            created_at=new_account.created_at,
+            updated_at=new_account.updated_at
+        )
         
     except HTTPException:
         db.rollback()
@@ -138,7 +220,7 @@ def create_bank_account(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to create bank account: {str(e)}")
 
-@router.get("/bank-accounts", response_model=List[BankAccountSchema])
+@router.get("/bank-accounts", response_model=List[BankAccountResponse])
 def get_bank_accounts(
     branch_id: Optional[int] = None,
     is_active: Optional[bool] = None,
@@ -163,25 +245,31 @@ def get_bank_accounts(
     
     result = []
     for account in accounts:
-        branch = db.query(Branch).filter(Branch.id == account.branch_id).first()
-        result.append({
-            "id": account.id,
-            "branch_id": account.branch_id,
-            "branch_name": branch.name if branch else "Unknown Branch",
-            "bank_name": account.bank_name,
-            "account_number": account.account_number,
-            "account_name": account.account_name,
-            "account_type": account.account_type,
-            "currency": account.currency,
-            "is_active": account.is_active,
-            "notes": account.notes,
-            "created_at": account.created_at,
-            "updated_at": account.updated_at
-        })
+        result.append(BankAccountResponse(
+            id=account.id,
+            branch_id=account.branch_id,
+            bank_name=account.bank_name,
+            branch_name=account.branch_name,
+            account_number=account.account_number,
+            account_name=account.account_name,
+            account_type=account.account_type,
+            iban=account.iban,
+            swift_code=account.swift_code,
+            currency=account.currency,
+            current_balance=float(account.current_balance),
+            is_active=account.is_active,
+            is_primary=account.is_primary,
+            last_reconciled_at=account.last_reconciled_at,
+            last_reconciled_balance=float(account.last_reconciled_balance) if account.last_reconciled_balance else None,
+            notes=account.notes,
+            created_by=account.created_by,
+            created_at=account.created_at,
+            updated_at=account.updated_at
+        ))
     
     return result
 
-@router.get("/bank-accounts/{account_id}", response_model=BankAccountSchema)
+@router.get("/bank-accounts/{account_id}", response_model=BankAccountResponse)
 def get_bank_account(
     account_id: int,
     db: Session = Depends(get_db),
@@ -199,24 +287,29 @@ def get_bank_account(
             detail="Not authorized to view this bank account"
         )
     
-    branch = db.query(Branch).filter(Branch.id == account.branch_id).first()
-    
-    return {
-        "id": account.id,
-        "branch_id": account.branch_id,
-        "branch_name": branch.name if branch else "Unknown Branch",
-        "bank_name": account.bank_name,
-        "account_number": account.account_number,
-        "account_name": account.account_name,
-        "account_type": account.account_type,
-        "currency": account.currency,
-        "is_active": account.is_active,
-        "notes": account.notes,
-        "created_at": account.created_at,
-        "updated_at": account.updated_at
-    }
+    return BankAccountResponse(
+        id=account.id,
+        branch_id=account.branch_id,
+        bank_name=account.bank_name,
+        branch_name=account.branch_name,
+        account_number=account.account_number,
+        account_name=account.account_name,
+        account_type=account.account_type,
+        iban=account.iban,
+        swift_code=account.swift_code,
+        currency=account.currency,
+        current_balance=float(account.current_balance),
+        is_active=account.is_active,
+        is_primary=account.is_primary,
+        last_reconciled_at=account.last_reconciled_at,
+        last_reconciled_balance=float(account.last_reconciled_balance) if account.last_reconciled_balance else None,
+        notes=account.notes,
+        created_by=account.created_by,
+        created_at=account.created_at,
+        updated_at=account.updated_at
+    )
 
-@router.put("/bank-accounts/{account_id}", response_model=BankAccountSchema)
+@router.put("/bank-accounts/{account_id}", response_model=BankAccountResponse)
 def update_bank_account(
     account_id: int,
     account_update: BankAccountUpdate,
@@ -238,22 +331,27 @@ def update_bank_account(
         db.commit()
         db.refresh(account)
         
-        branch = db.query(Branch).filter(Branch.id == account.branch_id).first()
-        
-        return {
-            "id": account.id,
-            "branch_id": account.branch_id,
-            "branch_name": branch.name if branch else "Unknown Branch",
-            "bank_name": account.bank_name,
-            "account_number": account.account_number,
-            "account_name": account.account_name,
-            "account_type": account.account_type,
-            "currency": account.currency,
-            "is_active": account.is_active,
-            "notes": account.notes,
-            "created_at": account.created_at,
-            "updated_at": account.updated_at
-        }
+        return BankAccountResponse(
+            id=account.id,
+            branch_id=account.branch_id,
+            bank_name=account.bank_name,
+            branch_name=account.branch_name,
+            account_number=account.account_number,
+            account_name=account.account_name,
+            account_type=account.account_type,
+            iban=account.iban,
+            swift_code=account.swift_code,
+            currency=account.currency,
+            current_balance=float(account.current_balance),
+            is_active=account.is_active,
+            is_primary=account.is_primary,
+            last_reconciled_at=account.last_reconciled_at,
+            last_reconciled_balance=float(account.last_reconciled_balance) if account.last_reconciled_balance else None,
+            notes=account.notes,
+            created_by=account.created_by,
+            created_at=account.created_at,
+            updated_at=account.updated_at
+        )
         
     except Exception as e:
         db.rollback()
@@ -283,7 +381,7 @@ def delete_bank_account(
         print(f"Error deleting bank account: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to delete bank account: {str(e)}")
 
-@router.patch("/bank-accounts/{account_id}/activate", response_model=BankAccountSchema)
+@router.patch("/bank-accounts/{account_id}/activate", response_model=BankAccountResponse)
 def activate_bank_account(
     account_id: int,
     db: Session = Depends(get_db),
@@ -301,22 +399,27 @@ def activate_bank_account(
         db.commit()
         db.refresh(account)
         
-        branch = db.query(Branch).filter(Branch.id == account.branch_id).first()
-        
-        return {
-            "id": account.id,
-            "branch_id": account.branch_id,
-            "branch_name": branch.name if branch else "Unknown Branch",
-            "bank_name": account.bank_name,
-            "account_number": account.account_number,
-            "account_name": account.account_name,
-            "account_type": account.account_type,
-            "currency": account.currency,
-            "is_active": account.is_active,
-            "notes": account.notes,
-            "created_at": account.created_at,
-            "updated_at": account.updated_at
-        }
+        return BankAccountResponse(
+            id=account.id,
+            branch_id=account.branch_id,
+            bank_name=account.bank_name,
+            branch_name=account.branch_name,
+            account_number=account.account_number,
+            account_name=account.account_name,
+            account_type=account.account_type,
+            iban=account.iban,
+            swift_code=account.swift_code,
+            currency=account.currency,
+            current_balance=float(account.current_balance),
+            is_active=account.is_active,
+            is_primary=account.is_primary,
+            last_reconciled_at=account.last_reconciled_at,
+            last_reconciled_balance=float(account.last_reconciled_balance) if account.last_reconciled_balance else None,
+            notes=account.notes,
+            created_by=account.created_by,
+            created_at=account.created_at,
+            updated_at=account.updated_at
+        )
         
     except Exception as e:
         db.rollback()
@@ -486,53 +589,59 @@ def create_refund(
                 "reason": item["reason"]
             })
         
-        # FIXED: Complete bank account details with all required fields
+        # Get bank account details if available
         bank_account_details = None
         if refund.bank_account_id:
             bank_account = db.query(BankAccount).filter(BankAccount.id == refund.bank_account_id).first()
             if bank_account:
-                bank_branch = db.query(Branch).filter(Branch.id == bank_account.branch_id).first()
-                bank_account_details = {
-                    "id": bank_account.id,
-                    "branch_id": bank_account.branch_id,
-                    "branch_name": bank_branch.name if bank_branch else None,
-                    "bank_name": bank_account.bank_name,
-                    "account_number": bank_account.account_number,
-                    "account_name": bank_account.account_name,
-                    "account_type": bank_account.account_type,
-                    "currency": bank_account.currency,
-                    "is_active": bank_account.is_active,
-                    "notes": bank_account.notes,
-                    "created_at": bank_account.created_at,
-                    "updated_at": bank_account.updated_at
-                }
+                bank_account_details = BankAccountResponse(
+                    id=bank_account.id,
+                    branch_id=bank_account.branch_id,
+                    bank_name=bank_account.bank_name,
+                    branch_name=bank_account.branch_name,
+                    account_number=bank_account.account_number,
+                    account_name=bank_account.account_name,
+                    account_type=bank_account.account_type,
+                    iban=bank_account.iban,
+                    swift_code=bank_account.swift_code,
+                    currency=bank_account.currency,
+                    current_balance=float(bank_account.current_balance),
+                    is_active=bank_account.is_active,
+                    is_primary=bank_account.is_primary,
+                    last_reconciled_at=bank_account.last_reconciled_at,
+                    last_reconciled_balance=float(bank_account.last_reconciled_balance) if bank_account.last_reconciled_balance else None,
+                    notes=bank_account.notes,
+                    created_by=bank_account.created_by,
+                    created_at=bank_account.created_at,
+                    updated_at=bank_account.updated_at
+                )
         
         print(f"Refund created successfully! Refund: {refund_number}, Amount: {float(total_refund_amount)}")
         
-        return {
-            "id": refund.id,
-            "refund_number": refund.refund_number,
-            "original_sale_id": refund.original_sale_id,
-            "original_invoice_number": original_sale.invoice_number,
-            "branch_id": refund.branch_id,
-            "branch_name": branch.name if branch else None,
-            "user_id": refund.user_id,
-            "user_name": current_user.name,
-            "customer_name": refund.customer_name,
-            "refund_amount": float(refund.refund_amount),
-            "refund_reason": refund.refund_reason,
-            "refund_method": refund.refund_method,
-            "bank_account_id": refund.bank_account_id,
-            "bank_account_details": bank_account_details,
-            "transaction_reference": refund.transaction_reference,
-            "status": refund.status,
-            "approved_by": None,
-            "approved_at": None,
-            "created_at": refund.created_at,
-            "completed_at": refund.completed_at,
-            "notes": refund.notes,
-            "items": response_items
-        }
+        return RefundResponse(
+            id=refund.id,
+            refund_number=refund.refund_number,
+            original_sale_id=refund.original_sale_id,
+            original_invoice_number=original_sale.invoice_number,
+            branch_id=refund.branch_id,
+            branch_name=branch.name if branch else None,
+            user_id=refund.user_id,
+            user_name=current_user.name,
+            customer_name=refund.customer_name,
+            refund_amount=float(refund.refund_amount),
+            refund_reason=refund.refund_reason,
+            refund_method=refund.refund_method,
+            bank_account_id=refund.bank_account_id,
+            bank_account_details=bank_account_details,
+            transaction_reference=refund.transaction_reference,
+            status=refund.status,
+            approved_by=None,
+            approved_at=None,
+            created_at=refund.created_at,
+            completed_at=refund.completed_at,
+            notes=refund.notes,
+            items=response_items
+        )
         
     except HTTPException:
         db.rollback()
@@ -594,51 +703,57 @@ def get_refunds(
                 "reason": item.reason
             })
         
-        # FIXED: Complete bank account details with all required fields
+        # Get bank account details if available
         bank_account_details = None
         if refund.bank_account_id:
             bank_account = db.query(BankAccount).filter(BankAccount.id == refund.bank_account_id).first()
             if bank_account:
-                bank_branch = db.query(Branch).filter(Branch.id == bank_account.branch_id).first()
-                bank_account_details = {
-                    "id": bank_account.id,
-                    "branch_id": bank_account.branch_id,
-                    "branch_name": bank_branch.name if bank_branch else None,
-                    "bank_name": bank_account.bank_name,
-                    "account_number": bank_account.account_number,
-                    "account_name": bank_account.account_name,
-                    "account_type": bank_account.account_type,
-                    "currency": bank_account.currency,
-                    "is_active": bank_account.is_active,
-                    "notes": bank_account.notes,
-                    "created_at": bank_account.created_at,
-                    "updated_at": bank_account.updated_at
-                }
+                bank_account_details = BankAccountResponse(
+                    id=bank_account.id,
+                    branch_id=bank_account.branch_id,
+                    bank_name=bank_account.bank_name,
+                    branch_name=bank_account.branch_name,
+                    account_number=bank_account.account_number,
+                    account_name=bank_account.account_name,
+                    account_type=bank_account.account_type,
+                    iban=bank_account.iban,
+                    swift_code=bank_account.swift_code,
+                    currency=bank_account.currency,
+                    current_balance=float(bank_account.current_balance),
+                    is_active=bank_account.is_active,
+                    is_primary=bank_account.is_primary,
+                    last_reconciled_at=bank_account.last_reconciled_at,
+                    last_reconciled_balance=float(bank_account.last_reconciled_balance) if bank_account.last_reconciled_balance else None,
+                    notes=bank_account.notes,
+                    created_by=bank_account.created_by,
+                    created_at=bank_account.created_at,
+                    updated_at=bank_account.updated_at
+                )
         
-        result.append({
-            "id": refund.id,
-            "refund_number": refund.refund_number,
-            "original_sale_id": refund.original_sale_id,
-            "original_invoice_number": original_sale.invoice_number if original_sale else None,
-            "branch_id": refund.branch_id,
-            "branch_name": branch.name if branch else None,
-            "user_id": refund.user_id,
-            "user_name": refund.user.name if refund.user else None,
-            "customer_name": refund.customer_name,
-            "refund_amount": float(refund.refund_amount),
-            "refund_reason": refund.refund_reason,
-            "refund_method": refund.refund_method,
-            "bank_account_id": refund.bank_account_id,
-            "bank_account_details": bank_account_details,
-            "transaction_reference": refund.transaction_reference,
-            "status": refund.status,
-            "approved_by": refund.approver.name if refund.approver else None,
-            "approved_at": refund.approved_at,
-            "created_at": refund.created_at,
-            "completed_at": refund.completed_at,
-            "notes": refund.notes,
-            "items": response_items
-        })
+        result.append(RefundResponse(
+            id=refund.id,
+            refund_number=refund.refund_number,
+            original_sale_id=refund.original_sale_id,
+            original_invoice_number=original_sale.invoice_number if original_sale else None,
+            branch_id=refund.branch_id,
+            branch_name=branch.name if branch else None,
+            user_id=refund.user_id,
+            user_name=refund.user.name if refund.user else None,
+            customer_name=refund.customer_name,
+            refund_amount=float(refund.refund_amount),
+            refund_reason=refund.refund_reason,
+            refund_method=refund.refund_method,
+            bank_account_id=refund.bank_account_id,
+            bank_account_details=bank_account_details,
+            transaction_reference=refund.transaction_reference,
+            status=refund.status,
+            approved_by=refund.approver.name if refund.approver else None,
+            approved_at=refund.approved_at,
+            created_at=refund.created_at,
+            completed_at=refund.completed_at,
+            notes=refund.notes,
+            items=response_items
+        ))
     
     return result
 
@@ -678,52 +793,58 @@ def get_refund(
             "reason": item.reason
         })
     
-    # FIXED: Complete bank account details with all required fields
+    # Get bank account details if available
     bank_account_details = None
     if refund.bank_account_id:
         bank_account = db.query(BankAccount).filter(BankAccount.id == refund.bank_account_id).first()
         if bank_account:
-            bank_branch = db.query(Branch).filter(Branch.id == bank_account.branch_id).first()
-            bank_account_details = {
-                "id": bank_account.id,
-                "branch_id": bank_account.branch_id,
-                "branch_name": bank_branch.name if bank_branch else None,
-                "bank_name": bank_account.bank_name,
-                "account_number": bank_account.account_number,
-                "account_name": bank_account.account_name,
-                "account_type": bank_account.account_type,
-                "currency": bank_account.currency,
-                "is_active": bank_account.is_active,
-                "notes": bank_account.notes,
-                "created_at": bank_account.created_at,
-                "updated_at": bank_account.updated_at
-            }
+            bank_account_details = BankAccountResponse(
+                id=bank_account.id,
+                branch_id=bank_account.branch_id,
+                bank_name=bank_account.bank_name,
+                branch_name=bank_account.branch_name,
+                account_number=bank_account.account_number,
+                account_name=bank_account.account_name,
+                account_type=bank_account.account_type,
+                iban=bank_account.iban,
+                swift_code=bank_account.swift_code,
+                currency=bank_account.currency,
+                current_balance=float(bank_account.current_balance),
+                is_active=bank_account.is_active,
+                is_primary=bank_account.is_primary,
+                last_reconciled_at=bank_account.last_reconciled_at,
+                last_reconciled_balance=float(bank_account.last_reconciled_balance) if bank_account.last_reconciled_balance else None,
+                notes=bank_account.notes,
+                created_by=bank_account.created_by,
+                created_at=bank_account.created_at,
+                updated_at=bank_account.updated_at
+            )
     
-    return {
-        "id": refund.id,
-        "refund_number": refund.refund_number,
-        "original_sale_id": refund.original_sale_id,
-        "original_invoice_number": original_sale.invoice_number if original_sale else None,
-        "branch_id": refund.branch_id,
-        "branch_name": branch.name if branch else None,
-        "user_id": refund.user_id,
-        "user_name": refund.user.name if refund.user else None,
-        "customer_name": refund.customer_name,
-        "refund_amount": float(refund.refund_amount),
-        "refund_reason": refund.refund_reason,
-        "refund_method": refund.refund_method,
-        "bank_account_id": refund.bank_account_id,
-        "bank_account_details": bank_account_details,
-        "transaction_reference": refund.transaction_reference,
-        "status": refund.status,
-        "approved_by": refund.approver.name if refund.approver else None,
-        "approved_at": refund.approved_at,
-        "created_at": refund.created_at,
-        "completed_at": refund.completed_at,
-        "notes": refund.notes,
-        "items": response_items
-    }
-    
+    return RefundResponse(
+        id=refund.id,
+        refund_number=refund.refund_number,
+        original_sale_id=refund.original_sale_id,
+        original_invoice_number=original_sale.invoice_number if original_sale else None,
+        branch_id=refund.branch_id,
+        branch_name=branch.name if branch else None,
+        user_id=refund.user_id,
+        user_name=refund.user.name if refund.user else None,
+        customer_name=refund.customer_name,
+        refund_amount=float(refund.refund_amount),
+        refund_reason=refund.refund_reason,
+        refund_method=refund.refund_method,
+        bank_account_id=refund.bank_account_id,
+        bank_account_details=bank_account_details,
+        transaction_reference=refund.transaction_reference,
+        status=refund.status,
+        approved_by=refund.approver.name if refund.approver else None,
+        approved_at=refund.approved_at,
+        created_at=refund.created_at,
+        completed_at=refund.completed_at,
+        notes=refund.notes,
+        items=response_items
+    )
+
 # ==================== SALE OPERATIONS ====================
 
 @router.post("", response_model=SaleResponse, status_code=status.HTTP_201_CREATED)
@@ -733,7 +854,8 @@ def create_sale(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Create a new sale transaction with tax, payment method, and bank account support"""
+    """Create a new sale transaction with tax, payment method, and bank account support.
+       When payment method is 'transfer', the amount is added to the wallet linked to the bank account."""
     
     print(f"=== CREATE SALE ===")
     print(f"User: {current_user.id} - {current_user.name} - Role: {current_user.role}")
@@ -760,7 +882,11 @@ def create_sale(
         if not branch:
             raise HTTPException(status_code=404, detail="Branch not found")
         
-        if sale_data.payment_method == "transfer":
+        # Track if this is a bank transfer payment
+        is_bank_transfer = sale_data.payment_method == "transfer"
+        wallet_to_credit = None
+        
+        if is_bank_transfer:
             if not sale_data.bank_account_id:
                 raise HTTPException(
                     status_code=400,
@@ -778,6 +904,13 @@ def create_sale(
                     status_code=404,
                     detail="Bank account not found or inactive"
                 )
+            
+            # Get the wallet associated with this bank account
+            wallet_to_credit = get_wallet_from_bank_account(db, bank_account.id, branch_id)
+            if wallet_to_credit:
+                print(f"Found wallet for bank account: {wallet_to_credit.wallet_name} (ID: {wallet_to_credit.id})")
+            else:
+                print(f"No wallet linked to bank account ID: {bank_account.id}")
         
         subtotal = Decimal('0')
         total_cost = Decimal('0')
@@ -900,39 +1033,75 @@ def create_sale(
         db.commit()
         db.refresh(sale)
         
+        # ==================== ADD TO WALLET FOR BANK TRANSFER ====================
+        if is_bank_transfer and wallet_to_credit and total_amount > 0:
+            try:
+                # Add the sale amount to the wallet (credit)
+                transaction = process_wallet_transaction(
+                    db=db,
+                    wallet_id=wallet_to_credit.id,
+                    transaction_type=WalletTransactionType.DEPOSIT.value,
+                    amount=total_amount,
+                    description=f"Sale #{invoice_number} - Customer: {sale_data.customer_name or 'Walk-in'}",
+                    user_id=current_user.id,
+                    transaction_method="bank_transfer",
+                    reference_type="sale",
+                    reference_id=sale.id,
+                    bank_reference=sale_data.transaction_reference
+                )
+                print(f"✅ Wallet credited: {transaction.transaction_number} - Amount: {total_amount} to wallet '{wallet_to_credit.wallet_name}'")
+                
+                # Update sale record with wallet transaction ID
+                sale.wallet_transaction_id = transaction.id
+                db.commit()
+                
+            except Exception as wallet_error:
+                print(f"⚠️ Wallet credit failed for sale #{invoice_number}: {wallet_error}")
+                # Don't fail the sale if wallet credit fails, just log it
+        else:
+            if is_bank_transfer and not wallet_to_credit:
+                print(f"⚠️ No wallet linked to bank account ID: {sale_data.bank_account_id}. Amount not added to wallet.")
+        
         response_items = []
         for item in sale_items:
-            response_items.append({
-                "id": 0,
-                "sale_id": sale.id,
-                "product_id": item["product"].id,
-                "product_name": item["product"].name,
-                "product_sku": item["product"].sku,
-                "quantity": float(item["quantity"]),
-                "unit_price": float(item["unit_price"]),
-                "discount_amount": float(item["discount_amount"]),
-                "line_total": float(item["line_total"])
-            })
+            response_items.append(SaleItemResponse(
+                id=0,
+                sale_id=sale.id,
+                product_id=item["product"].id,
+                product_name=item["product"].name,
+                product_sku=item["product"].sku,
+                quantity=float(item["quantity"]),
+                unit_price=float(item["unit_price"]),
+                discount_amount=float(item["discount_amount"]),
+                line_total=float(item["line_total"])
+            ))
         
+        # Get bank account details if available
         bank_account_details = None
         if sale.bank_account_id:
             bank_account = db.query(BankAccount).filter(BankAccount.id == sale.bank_account_id).first()
             if bank_account:
-                bank_branch = db.query(Branch).filter(Branch.id == bank_account.branch_id).first()
-                bank_account_details = {
-                    "id": bank_account.id,
-                    "branch_id": bank_account.branch_id,
-                    "branch_name": bank_branch.name if bank_branch else None,
-                    "bank_name": bank_account.bank_name,
-                    "account_number": bank_account.account_number,
-                    "account_name": bank_account.account_name,
-                    "account_type": bank_account.account_type,
-                    "currency": bank_account.currency,
-                    "is_active": bank_account.is_active,
-                    "notes": bank_account.notes,
-                    "created_at": bank_account.created_at,
-                    "updated_at": bank_account.updated_at
-                }
+                bank_account_details = BankAccountResponse(
+                    id=bank_account.id,
+                    branch_id=bank_account.branch_id,
+                    bank_name=bank_account.bank_name,
+                    branch_name=bank_account.branch_name,
+                    account_number=bank_account.account_number,
+                    account_name=bank_account.account_name,
+                    account_type=bank_account.account_type,
+                    iban=bank_account.iban,
+                    swift_code=bank_account.swift_code,
+                    currency=bank_account.currency,
+                    current_balance=float(bank_account.current_balance),
+                    is_active=bank_account.is_active,
+                    is_primary=bank_account.is_primary,
+                    last_reconciled_at=bank_account.last_reconciled_at,
+                    last_reconciled_balance=float(bank_account.last_reconciled_balance) if bank_account.last_reconciled_balance else None,
+                    notes=bank_account.notes,
+                    created_by=bank_account.created_by,
+                    created_at=bank_account.created_at,
+                    updated_at=bank_account.updated_at
+                )
         
         print(f"Sale created successfully! Invoice: {invoice_number}, Total: {float(total_amount)}")
         
@@ -972,36 +1141,36 @@ def create_sale(
             traceback.print_exc()
         # ==================== END EMAIL NOTIFICATION ====================
         
-        return {
-            "id": sale.id,
-            "invoice_number": sale.invoice_number,
-            "branch_id": sale.branch_id,
-            "branch_name": branch.name,
-            "user_id": sale.user_id,
-            "user_name": current_user.name,
-            "customer_name": sale.customer_name,
-            "customer_phone": sale.customer_phone,
-            "customer_email": sale.customer_email,
-            "subtotal": float(sale.subtotal),
-            "tax_amount": float(sale.tax_amount),
-            "tax_rate": float(sale.tax_rate),
-            "discount_amount": float(sale.discount_amount),
-            "discount_type": sale.discount_type,
-            "shipping_cost": float(sale.shipping_cost),
-            "total_amount": float(sale.total_amount),
-            "total_cost": float(sale.total_cost),
-            "payment_method": sale.payment_method,
-            "bank_account_id": sale.bank_account_id,
-            "bank_account_details": bank_account_details,
-            "transaction_reference": sale.transaction_reference,
-            "status": sale.status,
-            "refund_amount": float(sale.refund_amount),
-            "refund_status": sale.refund_status,
-            "created_at": sale.created_at,
-            "updated_at": sale.updated_at,
-            "notes": sale.notes,
-            "items": response_items
-        }
+        return SaleResponse(
+            id=sale.id,
+            invoice_number=sale.invoice_number,
+            branch_id=sale.branch_id,
+            branch_name=branch.name,
+            user_id=sale.user_id,
+            user_name=current_user.name,
+            customer_name=sale.customer_name,
+            customer_phone=sale.customer_phone,
+            customer_email=sale.customer_email,
+            subtotal=float(sale.subtotal),
+            tax_amount=float(sale.tax_amount),
+            tax_rate=float(sale.tax_rate),
+            discount_amount=float(sale.discount_amount),
+            discount_type=sale.discount_type,
+            shipping_cost=float(sale.shipping_cost),
+            total_amount=float(sale.total_amount),
+            total_cost=float(sale.total_cost),
+            payment_method=sale.payment_method,
+            bank_account_id=sale.bank_account_id,
+            bank_account_details=bank_account_details,
+            transaction_reference=sale.transaction_reference,
+            status=sale.status,
+            refund_amount=float(sale.refund_amount),
+            refund_status=sale.refund_status,
+            created_at=sale.created_at,
+            updated_at=sale.updated_at,
+            notes=sale.notes,
+            items=response_items
+        )
         
     except HTTPException:
         db.rollback()
@@ -1059,70 +1228,76 @@ def get_sales(
     for sale in sales:
         items = db.query(SaleItem).filter(SaleItem.sale_id == sale.id).all()
         
-        # FIXED: Complete bank account details with all required fields
+        # Get bank account details if available
         bank_account_details = None
         if sale.bank_account_id:
             bank_account = db.query(BankAccount).filter(BankAccount.id == sale.bank_account_id).first()
             if bank_account:
-                bank_branch = db.query(Branch).filter(Branch.id == bank_account.branch_id).first()
-                bank_account_details = {
-                    "id": bank_account.id,
-                    "branch_id": bank_account.branch_id,
-                    "branch_name": bank_branch.name if bank_branch else None,
-                    "bank_name": bank_account.bank_name,
-                    "account_number": bank_account.account_number,
-                    "account_name": bank_account.account_name,
-                    "account_type": bank_account.account_type,
-                    "currency": bank_account.currency,
-                    "is_active": bank_account.is_active,
-                    "notes": bank_account.notes,
-                    "created_at": bank_account.created_at,
-                    "updated_at": bank_account.updated_at
-                }
+                bank_account_details = BankAccountResponse(
+                    id=bank_account.id,
+                    branch_id=bank_account.branch_id,
+                    bank_name=bank_account.bank_name,
+                    branch_name=bank_account.branch_name,
+                    account_number=bank_account.account_number,
+                    account_name=bank_account.account_name,
+                    account_type=bank_account.account_type,
+                    iban=bank_account.iban,
+                    swift_code=bank_account.swift_code,
+                    currency=bank_account.currency,
+                    current_balance=float(bank_account.current_balance),
+                    is_active=bank_account.is_active,
+                    is_primary=bank_account.is_primary,
+                    last_reconciled_at=bank_account.last_reconciled_at,
+                    last_reconciled_balance=float(bank_account.last_reconciled_balance) if bank_account.last_reconciled_balance else None,
+                    notes=bank_account.notes,
+                    created_by=bank_account.created_by,
+                    created_at=bank_account.created_at,
+                    updated_at=bank_account.updated_at
+                )
         
-        result.append({
-            "id": sale.id,
-            "invoice_number": sale.invoice_number,
-            "branch_id": sale.branch_id,
-            "branch_name": sale.branch.name if sale.branch else None,
-            "user_id": sale.user_id,
-            "user_name": sale.user.name if sale.user else None,
-            "customer_name": sale.customer_name,
-            "customer_phone": sale.customer_phone,
-            "customer_email": sale.customer_email,
-            "subtotal": float(sale.subtotal),
-            "tax_amount": float(sale.tax_amount),
-            "tax_rate": float(sale.tax_rate),
-            "discount_amount": float(sale.discount_amount),
-            "discount_type": sale.discount_type,
-            "shipping_cost": float(sale.shipping_cost),
-            "total_amount": float(sale.total_amount),
-            "total_cost": float(sale.total_cost),
-            "payment_method": sale.payment_method,
-            "bank_account_id": sale.bank_account_id,
-            "bank_account_details": bank_account_details,
-            "transaction_reference": sale.transaction_reference,
-            "status": sale.status,
-            "refund_amount": float(sale.refund_amount),
-            "refund_status": sale.refund_status,
-            "created_at": sale.created_at,
-            "updated_at": sale.updated_at,
-            "notes": sale.notes,
-            "items": [
-                {
-                    "id": item.id,
-                    "sale_id": item.sale_id,
-                    "product_id": item.product_id,
-                    "product_name": item.product.name if item.product else None,
-                    "product_sku": item.product.sku if item.product else None,
-                    "quantity": float(item.quantity),
-                    "unit_price": float(item.unit_price),
-                    "discount_amount": float(item.discount_amount),
-                    "line_total": float(item.line_total)
-                }
+        result.append(SaleResponse(
+            id=sale.id,
+            invoice_number=sale.invoice_number,
+            branch_id=sale.branch_id,
+            branch_name=sale.branch.name if sale.branch else None,
+            user_id=sale.user_id,
+            user_name=sale.user.name if sale.user else None,
+            customer_name=sale.customer_name,
+            customer_phone=sale.customer_phone,
+            customer_email=sale.customer_email,
+            subtotal=float(sale.subtotal),
+            tax_amount=float(sale.tax_amount),
+            tax_rate=float(sale.tax_rate),
+            discount_amount=float(sale.discount_amount),
+            discount_type=sale.discount_type,
+            shipping_cost=float(sale.shipping_cost),
+            total_amount=float(sale.total_amount),
+            total_cost=float(sale.total_cost),
+            payment_method=sale.payment_method,
+            bank_account_id=sale.bank_account_id,
+            bank_account_details=bank_account_details,
+            transaction_reference=sale.transaction_reference,
+            status=sale.status,
+            refund_amount=float(sale.refund_amount),
+            refund_status=sale.refund_status,
+            created_at=sale.created_at,
+            updated_at=sale.updated_at,
+            notes=sale.notes,
+            items=[
+                SaleItemResponse(
+                    id=item.id,
+                    sale_id=item.sale_id,
+                    product_id=item.product_id,
+                    product_name=item.product.name if item.product else None,
+                    product_sku=item.product.sku if item.product else None,
+                    quantity=float(item.quantity),
+                    unit_price=float(item.unit_price),
+                    discount_amount=float(item.discount_amount),
+                    line_total=float(item.line_total)
+                )
                 for item in items
             ]
-        })
+        ))
     
     return result
 
@@ -1147,70 +1322,76 @@ def get_sale(
     
     items = db.query(SaleItem).filter(SaleItem.sale_id == sale.id).all()
     
-    # FIXED: Complete bank account details with all required fields
+    # Get bank account details if available
     bank_account_details = None
     if sale.bank_account_id:
         bank_account = db.query(BankAccount).filter(BankAccount.id == sale.bank_account_id).first()
         if bank_account:
-            bank_branch = db.query(Branch).filter(Branch.id == bank_account.branch_id).first()
-            bank_account_details = {
-                "id": bank_account.id,
-                "branch_id": bank_account.branch_id,
-                "branch_name": bank_branch.name if bank_branch else None,
-                "bank_name": bank_account.bank_name,
-                "account_number": bank_account.account_number,
-                "account_name": bank_account.account_name,
-                "account_type": bank_account.account_type,
-                "currency": bank_account.currency,
-                "is_active": bank_account.is_active,
-                "notes": bank_account.notes,
-                "created_at": bank_account.created_at,
-                "updated_at": bank_account.updated_at
-            }
+            bank_account_details = BankAccountResponse(
+                id=bank_account.id,
+                branch_id=bank_account.branch_id,
+                bank_name=bank_account.bank_name,
+                branch_name=bank_account.branch_name,
+                account_number=bank_account.account_number,
+                account_name=bank_account.account_name,
+                account_type=bank_account.account_type,
+                iban=bank_account.iban,
+                swift_code=bank_account.swift_code,
+                currency=bank_account.currency,
+                current_balance=float(bank_account.current_balance),
+                is_active=bank_account.is_active,
+                is_primary=bank_account.is_primary,
+                last_reconciled_at=bank_account.last_reconciled_at,
+                last_reconciled_balance=float(bank_account.last_reconciled_balance) if bank_account.last_reconciled_balance else None,
+                notes=bank_account.notes,
+                created_by=bank_account.created_by,
+                created_at=bank_account.created_at,
+                updated_at=bank_account.updated_at
+            )
     
-    return {
-        "id": sale.id,
-        "invoice_number": sale.invoice_number,
-        "branch_id": sale.branch_id,
-        "branch_name": sale.branch.name if sale.branch else None,
-        "user_id": sale.user_id,
-        "user_name": sale.user.name if sale.user else None,
-        "customer_name": sale.customer_name,
-        "customer_phone": sale.customer_phone,
-        "customer_email": sale.customer_email,
-        "subtotal": float(sale.subtotal),
-        "tax_amount": float(sale.tax_amount),
-        "tax_rate": float(sale.tax_rate),
-        "discount_amount": float(sale.discount_amount),
-        "discount_type": sale.discount_type,
-        "shipping_cost": float(sale.shipping_cost),
-        "total_amount": float(sale.total_amount),
-        "total_cost": float(sale.total_cost),
-        "payment_method": sale.payment_method,
-        "bank_account_id": sale.bank_account_id,
-        "bank_account_details": bank_account_details,
-        "transaction_reference": sale.transaction_reference,
-        "status": sale.status,
-        "refund_amount": float(sale.refund_amount),
-        "refund_status": sale.refund_status,
-        "created_at": sale.created_at,
-        "updated_at": sale.updated_at,
-        "notes": sale.notes,
-        "items": [
-            {
-                "id": item.id,
-                "sale_id": item.sale_id,
-                "product_id": item.product_id,
-                "product_name": item.product.name if item.product else None,
-                "product_sku": item.product.sku if item.product else None,
-                "quantity": float(item.quantity),
-                "unit_price": float(item.unit_price),
-                "discount_amount": float(item.discount_amount),
-                "line_total": float(item.line_total)
-            }
+    return SaleResponse(
+        id=sale.id,
+        invoice_number=sale.invoice_number,
+        branch_id=sale.branch_id,
+        branch_name=sale.branch.name if sale.branch else None,
+        user_id=sale.user_id,
+        user_name=sale.user.name if sale.user else None,
+        customer_name=sale.customer_name,
+        customer_phone=sale.customer_phone,
+        customer_email=sale.customer_email,
+        subtotal=float(sale.subtotal),
+        tax_amount=float(sale.tax_amount),
+        tax_rate=float(sale.tax_rate),
+        discount_amount=float(sale.discount_amount),
+        discount_type=sale.discount_type,
+        shipping_cost=float(sale.shipping_cost),
+        total_amount=float(sale.total_amount),
+        total_cost=float(sale.total_cost),
+        payment_method=sale.payment_method,
+        bank_account_id=sale.bank_account_id,
+        bank_account_details=bank_account_details,
+        transaction_reference=sale.transaction_reference,
+        status=sale.status,
+        refund_amount=float(sale.refund_amount),
+        refund_status=sale.refund_status,
+        created_at=sale.created_at,
+        updated_at=sale.updated_at,
+        notes=sale.notes,
+        items=[
+            SaleItemResponse(
+                id=item.id,
+                sale_id=item.sale_id,
+                product_id=item.product_id,
+                product_name=item.product.name if item.product else None,
+                product_sku=item.product.sku if item.product else None,
+                quantity=float(item.quantity),
+                unit_price=float(item.unit_price),
+                discount_amount=float(item.discount_amount),
+                line_total=float(item.line_total)
+            )
             for item in items
         ]
-    }
+    )
     
 @router.put("/{sale_id}", response_model=SaleResponse)
 def update_sale(

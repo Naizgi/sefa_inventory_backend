@@ -1,18 +1,25 @@
+# app/utils/dependencies.py
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer, HTTPBearer
 from sqlalchemy.orm import Session
+from typing import Optional
 from app.database import get_db
 from app.models import User
 from app.config import settings
 import jwt
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
+security = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
     db: Session = Depends(get_db),
     token: str = Depends(oauth2_scheme)
 ):
+    """
+    Get current user from JWT token.
+    Raises 401 if token is invalid or user not found.
+    """
     try:
         payload = jwt.decode(
             token,
@@ -47,6 +54,38 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials"
         )
+
+
+def get_current_user_optional(
+    db: Session = Depends(get_db),
+    token: Optional[str] = Depends(oauth2_scheme)
+) -> Optional[User]:
+    """
+    Get current user from JWT token if present.
+    Returns None if token is invalid or not provided.
+    Does NOT raise exceptions for missing/invalid tokens.
+    This is useful for endpoints that want to optionally identify the user.
+    """
+    if token is None:
+        return None
+    
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM]
+        )
+        
+        user_id = payload.get("user_id")
+        if not user_id:
+            return None
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        return user
+        
+    except Exception:
+        # If token is invalid, just return None
+        return None
 
 
 def get_current_active_user(
@@ -196,3 +235,31 @@ def require_manage_suppliers(current_user: User = Depends(get_current_user)) -> 
             detail="Supplier management requires privileged access"
         )
     return current_user
+
+
+# ==================== ADDITIONAL HELPER FUNCTIONS ====================
+
+def get_current_branch_id(
+    current_user: User = Depends(get_current_user)
+) -> int:
+    """
+    Get the current user's branch ID.
+    Useful for filtering data by branch.
+    """
+    if current_user.is_admin():
+        # Admin might not have a branch, return 0
+        return 0
+    return current_user.branch_id or 0
+
+
+def require_branch_access(
+    branch_id: int,
+    current_user: User = Depends(get_current_user)
+) -> bool:
+    """
+    Check if current user has access to the specified branch.
+    Admin has access to all branches.
+    """
+    if current_user.is_admin():
+        return True
+    return current_user.branch_id == branch_id

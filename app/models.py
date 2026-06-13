@@ -1,3 +1,4 @@
+# app/models.py
 from sqlalchemy import Column, Integer, String, Text, Float, Boolean, DateTime, Date, ForeignKey, DECIMAL, UniqueConstraint, Index
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -71,6 +72,30 @@ class WalletTransactionStatus(str, enum.Enum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
+
+class WalletType(str, enum.Enum):
+    VAT = "vat"                    # VAT-tracked wallet
+    REGULAR = "regular"            # Regular stock wallet
+    PETTY_CASH = "petty_cash"      # Petty cash wallet
+    EXPENSE = "expense"            # Expense wallet
+    CUSTOM = "custom"              # Custom wallet type
+
+class WalletPurpose(str, enum.Enum):
+    VAT_OPERATIONS = "vat_operations"
+    REGULAR_STOCK = "regular_stock"
+    PETTY_CASH = "petty_cash"
+    OPERATING_EXPENSES = "operating_expenses"
+    MARKETING = "marketing"
+    MAINTENANCE = "maintenance"
+    OTHER = "other"
+
+class WalletTransactionMethod(str, enum.Enum):
+    CASH = "cash"
+    BANK_TRANSFER = "bank_transfer"
+    CHEQUE = "cheque"
+    CARD = "card"
+    MOBILE_MONEY = "mobile_money"
+    INTERNAL_TRANSFER = "internal_transfer"
 
 # ==================== BRANCH MODEL ====================
 class Branch(Base):
@@ -167,6 +192,9 @@ class User(Base):
     
     # Wallet relationships
     wallet_transactions_created = relationship("WalletTransaction", foreign_keys="WalletTransaction.created_by", back_populates="creator")
+    wallets_created = relationship("Wallet", foreign_keys="Wallet.created_by", back_populates="creator")
+    bank_accounts_created = relationship("BankAccount", foreign_keys="BankAccount.created_by", back_populates="creator")
+    bank_transactions_reconciled = relationship("BankTransaction", foreign_keys="BankTransaction.reconciled_by", back_populates="reconciler")
     
     # Helper methods
     def is_admin(self) -> bool:
@@ -197,27 +225,56 @@ class User(Base):
         return self.is_admin()
 
 
-# ==================== BANK ACCOUNT MODEL ====================
+# ==================== BANK ACCOUNT MODEL (ENHANCED with account_category) ====================
 class BankAccount(Base):
     __tablename__ = "bank_accounts"
     
     id = Column(Integer, primary_key=True, index=True)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    
+    # Bank details
     bank_name = Column(String(100), nullable=False)
+    branch_name = Column(String(100), nullable=True)
     account_number = Column(String(50), nullable=False)
     account_name = Column(String(255), nullable=False)
-    account_type = Column(String(50), default="checking")
+    account_type = Column(String(50), default="checking")  # checking, savings, business
+    iban = Column(String(50), nullable=True)
+    swift_code = Column(String(20), nullable=True)
+    
+    # Financial details
     currency = Column(String(3), default="ETB")
+    current_balance = Column(DECIMAL(15, 2), default=0)
+    
+    # Account settings
     is_active = Column(Boolean, default=True)
+    is_primary = Column(Boolean, default=False)
+    account_category = Column(String(20), default="regular")  # NEW: "vat" or "regular"
+    
+    # Reconciliation
+    last_reconciled_at = Column(DateTime(timezone=True), nullable=True)
+    last_reconciled_balance = Column(DECIMAL(15, 2), nullable=True)
+    
+    # Metadata
     notes = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     # Relationships
     branch = relationship("Branch", back_populates="bank_accounts")
+    wallets = relationship("Wallet", back_populates="bank_account")
+    bank_transactions = relationship("BankTransaction", back_populates="bank_account", cascade="all, delete-orphan")
     sales = relationship("Sale", back_populates="bank_account")
     refunds = relationship("Refund", back_populates="bank_account")
     purchase_orders = relationship("PurchaseOrder", back_populates="bank_account")
+    creator = relationship("User", foreign_keys=[created_by], back_populates="bank_accounts_created")
+    
+    __table_args__ = (
+        UniqueConstraint('branch_id', 'account_number', name='unique_branch_account'),
+        Index('idx_bank_account_branch', 'branch_id'),
+        Index('idx_bank_account_active', 'is_active'),
+        Index('idx_bank_account_category', 'account_category'),  # NEW index for category filtering
+    )
 
 
 # ==================== STOCK MODEL ====================
@@ -383,12 +440,19 @@ class PurchaseOrder(Base):
     payment_reference = Column(String(100), nullable=True)
     payment_date = Column(DateTime(timezone=True), nullable=True)
     
+    # Wallet payment fields
+    use_wallet_payment = Column(Boolean, default=False)
+    wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True)
+    wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
+    
     # Relationships
     branch = relationship("Branch", back_populates="purchase_orders")
     items = relationship("PurchaseOrderItem", back_populates="purchase_order", cascade="all, delete-orphan")
     creator = relationship("User", foreign_keys=[created_by], back_populates="purchase_orders")
     bank_account = relationship("BankAccount", back_populates="purchase_orders")
     vat_purchases = relationship("VATPurchase", back_populates="purchase_order", cascade="all, delete-orphan")
+    wallet = relationship("Wallet", foreign_keys=[wallet_id])
+    wallet_transaction = relationship("WalletTransaction", foreign_keys=[wallet_transaction_id])
 
 
 class PurchaseOrderItem(Base):
@@ -655,7 +719,6 @@ class DamagedGoods(Base):
         Index('idx_damaged_date', 'reported_at'),
     )
 
-
 # ==================== TEMP ITEM MODEL ====================
 class TempItemStatus(str, enum.Enum):
     PENDING = "pending"
@@ -738,12 +801,19 @@ class VATPurchase(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     
+    # Wallet payment fields
+    use_wallet_payment = Column(Boolean, default=False)
+    wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True)
+    wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
+    
     # Relationships
     branch = relationship("Branch", foreign_keys=[branch_id], back_populates="vat_purchases")
     product = relationship("Product", foreign_keys=[product_id], back_populates="vat_purchases")
     creator = relationship("User", foreign_keys=[created_by], back_populates="vat_purchases_created")
     purchase_order = relationship("PurchaseOrder", foreign_keys=[purchase_order_id], back_populates="vat_purchases")
     vat_sales = relationship("VATSale", back_populates="vat_purchase", cascade="all, delete-orphan")
+    wallet = relationship("Wallet", foreign_keys=[wallet_id])
+    wallet_transaction = relationship("WalletTransaction", foreign_keys=[wallet_transaction_id])
     
     __table_args__ = (
         Index('idx_vat_purchase_branch', 'branch_id'),
@@ -790,6 +860,9 @@ class VATSale(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     
+    # Wallet transaction tracking
+    wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
+    
     # Relationships
     sale = relationship("Sale", foreign_keys=[sale_id], back_populates="vat_sales")
     sale_item = relationship("SaleItem", foreign_keys=[sale_item_id], back_populates="vat_sale")
@@ -797,6 +870,7 @@ class VATSale(Base):
     product = relationship("Product", foreign_keys=[product_id], back_populates="vat_sales")
     branch = relationship("Branch", foreign_keys=[branch_id], back_populates="vat_sales")
     creator = relationship("User", foreign_keys=[created_by], back_populates="vat_sales_created")
+    wallet_transaction = relationship("WalletTransaction", foreign_keys=[wallet_transaction_id])
     
     __table_args__ = (
         Index('idx_vat_sale_branch', 'branch_id'),
@@ -875,28 +949,57 @@ class VATRateHistory(Base):
     )
 
 
-# ==================== WALLET MODELS ====================
+# ==================== ENHANCED WALLET MODELS ====================
 
 class Wallet(Base):
     __tablename__ = "wallets"
     
     id = Column(Integer, primary_key=True, index=True)
+    wallet_number = Column(String(50), unique=True, nullable=False, index=True)
+    wallet_name = Column(String(100), nullable=False)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
-    wallet_type = Column(String(50), nullable=False)  # 'vat' or 'regular'
+    wallet_type = Column(String(50), nullable=False)  # vat, regular, petty_cash, expense, custom
+    wallet_purpose = Column(String(50), default=WalletPurpose.OTHER.value)
+    
+    # Financial details
     balance = Column(DECIMAL(15, 2), default=0)
     currency = Column(String(3), default="ETB")
+    
+    # Bank account integration (optional - can be null for cash-based wallets)
+    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
+    
+    # Wallet settings
     is_active = Column(Boolean, default=True)
+    requires_approval = Column(Boolean, default=False)  # For high-value transactions
+    max_balance = Column(DECIMAL(15, 2), nullable=True)  # Optional max limit
+    min_balance = Column(DECIMAL(15, 2), nullable=True)  # Optional minimum balance alert
+    daily_limit = Column(DECIMAL(15, 2), nullable=True)
+    transaction_limit = Column(DECIMAL(15, 2), nullable=True)
+    
+    # Metadata
+    description = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     # Relationships
-    branch = relationship("Branch", foreign_keys=[branch_id], back_populates="wallets")
-    transactions = relationship("WalletTransaction", back_populates="wallet", cascade="all, delete-orphan")
+    branch = relationship("Branch", back_populates="wallets")
+    bank_account = relationship("BankAccount", back_populates="wallets")
+    transactions = relationship(
+        "WalletTransaction", 
+        foreign_keys="WalletTransaction.wallet_id",
+        back_populates="wallet", 
+        cascade="all, delete-orphan"
+    )
+    summaries = relationship("WalletSummary", back_populates="wallet", cascade="all, delete-orphan")
+    creator = relationship("User", foreign_keys=[created_by], back_populates="wallets_created")
     
     __table_args__ = (
-        UniqueConstraint('branch_id', 'wallet_type', name='unique_branch_wallet_type'),
+        UniqueConstraint('branch_id', 'wallet_number', name='unique_branch_wallet_number'),
         Index('idx_wallet_branch', 'branch_id'),
         Index('idx_wallet_type', 'wallet_type'),
+        Index('idx_wallet_bank_account', 'bank_account_id'),
+        Index('idx_wallet_active', 'is_active'),
     )
 
 
@@ -906,29 +1009,114 @@ class WalletTransaction(Base):
     id = Column(Integer, primary_key=True, index=True)
     transaction_number = Column(String(50), unique=True, nullable=False, index=True)
     wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=False)
-    transaction_type = Column(String(50), nullable=False)
+    
+    # Transaction details
+    transaction_type = Column(String(50), nullable=False)  # deposit, withdrawal, transfer, purchase, restock, refund
+    transaction_method = Column(String(50), nullable=False, default=WalletTransactionMethod.CASH.value)
     amount = Column(DECIMAL(15, 2), nullable=False)
+    
+    # For transfers between wallets
+    from_wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True)
+    to_wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True)
+    
+    # Balance tracking
     balance_before = Column(DECIMAL(15, 2), nullable=False)
     balance_after = Column(DECIMAL(15, 2), nullable=False)
+    
+    # Status tracking
     status = Column(String(50), default=WalletTransactionStatus.COMPLETED.value)
+    approval_status = Column(String(50), default="approved")  # pending, approved, rejected
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
     
-    # Reference to related transactions
-    reference_type = Column(String(50), nullable=True)  # 'purchase', 'restock', 'refund'
+    # Reference to related business transactions
+    reference_type = Column(String(50), nullable=True)  # purchase_order, sale, refund, restock
     reference_id = Column(Integer, nullable=True)
+    reference_number = Column(String(100), nullable=True)
     
+    # Bank integration
+    bank_transaction_id = Column(String(100), nullable=True)  # Reference to bank statement
+    bank_reference = Column(String(100), nullable=True)
+    
+    # Additional details
     description = Column(Text, nullable=True)
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    attachments = Column(Text, nullable=True)  # JSON array of attachment URLs
+    notes = Column(Text, nullable=True)
+    
+    # Audit fields
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     # Relationships
-    wallet = relationship("Wallet", foreign_keys=[wallet_id], back_populates="transactions")
+    wallet = relationship(
+        "Wallet", 
+        foreign_keys=[wallet_id],
+        back_populates="transactions"
+    )
+    from_wallet = relationship(
+        "Wallet", 
+        foreign_keys=[from_wallet_id],
+        back_populates=None
+    )
+    to_wallet = relationship(
+        "Wallet", 
+        foreign_keys=[to_wallet_id],
+        back_populates=None
+    )
     creator = relationship("User", foreign_keys=[created_by], back_populates="wallet_transactions_created")
+    approver = relationship("User", foreign_keys=[approved_by])
     
     __table_args__ = (
         Index('idx_wallet_transaction_wallet', 'wallet_id'),
         Index('idx_wallet_transaction_type', 'transaction_type'),
+        Index('idx_wallet_transaction_method', 'transaction_method'),
         Index('idx_wallet_transaction_reference', 'reference_type', 'reference_id'),
         Index('idx_wallet_transaction_created', 'created_at'),
+        Index('idx_wallet_transaction_status', 'status'),
+        Index('idx_wallet_transaction_bank_ref', 'bank_reference'),
+    )
+
+
+class BankTransaction(Base):
+    __tablename__ = "bank_transactions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=False)
+    
+    # Transaction details from bank
+    transaction_date = Column(DateTime(timezone=True), nullable=False)
+    transaction_type = Column(String(50), nullable=False)  # credit, debit
+    amount = Column(DECIMAL(15, 2), nullable=False)
+    description = Column(Text, nullable=True)
+    reference = Column(String(100), nullable=True)
+    
+    # Bank statement reference
+    statement_date = Column(Date, nullable=True)
+    statement_balance = Column(DECIMAL(15, 2), nullable=True)
+    
+    # Reconciliation
+    is_reconciled = Column(Boolean, default=False)
+    reconciled_at = Column(DateTime(timezone=True), nullable=True)
+    reconciled_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    
+    # Link to wallet transaction
+    wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
+    
+    # Metadata
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    bank_account = relationship("BankAccount", back_populates="bank_transactions")
+    wallet_transaction = relationship("WalletTransaction", foreign_keys=[wallet_transaction_id])
+    reconciler = relationship("User", foreign_keys=[reconciled_by], back_populates="bank_transactions_reconciled")
+    
+    __table_args__ = (
+        Index('idx_bank_transaction_account', 'bank_account_id'),
+        Index('idx_bank_transaction_date', 'transaction_date'),
+        Index('idx_bank_transaction_reconciled', 'is_reconciled'),
+        Index('idx_bank_transaction_reference', 'reference'),
     )
 
 
@@ -936,44 +1124,54 @@ class WalletSummary(Base):
     __tablename__ = "wallet_summaries"
     
     id = Column(Integer, primary_key=True, index=True)
+    wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=False)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     summary_date = Column(Date, nullable=False)
     
     # Opening balances
-    opening_balance_vat = Column(DECIMAL(15, 2), default=0)
-    opening_balance_regular = Column(DECIMAL(15, 2), default=0)
+    opening_balance = Column(DECIMAL(15, 2), default=0)
     
-    # Income (only deposits)
-    deposits_vat = Column(DECIMAL(15, 2), default=0)
-    deposits_regular = Column(DECIMAL(15, 2), default=0)
+    # Income
+    total_deposits = Column(DECIMAL(15, 2), default=0)
+    total_transfers_in = Column(DECIMAL(15, 2), default=0)
     
     # Expenses
-    purchase_expenses_vat = Column(DECIMAL(15, 2), default=0)
-    purchase_expenses_regular = Column(DECIMAL(15, 2), default=0)
-    restock_expenses_vat = Column(DECIMAL(15, 2), default=0)
-    restock_expenses_regular = Column(DECIMAL(15, 2), default=0)
-    refunds_vat = Column(DECIMAL(15, 2), default=0)
-    refunds_regular = Column(DECIMAL(15, 2), default=0)
-    withdrawals_vat = Column(DECIMAL(15, 2), default=0)
-    withdrawals_regular = Column(DECIMAL(15, 2), default=0)
+    total_withdrawals = Column(DECIMAL(15, 2), default=0)
+    total_transfers_out = Column(DECIMAL(15, 2), default=0)
+    total_purchases = Column(DECIMAL(15, 2), default=0)
+    total_restocks = Column(DECIMAL(15, 2), default=0)
+    total_refunds = Column(DECIMAL(15, 2), default=0)
     
-    # Closing balances
-    closing_balance_vat = Column(DECIMAL(15, 2), default=0)
-    closing_balance_regular = Column(DECIMAL(15, 2), default=0)
+    # Closing balance
+    closing_balance = Column(DECIMAL(15, 2), default=0)
     
-    # Profit/Loss (wallet performance)
-    net_profit_vat = Column(DECIMAL(15, 2), default=0)
-    net_profit_regular = Column(DECIMAL(15, 2), default=0)
-    total_profit = Column(DECIMAL(15, 2), default=0)
+    # Statistics
+    transaction_count = Column(Integer, default=0)
+    average_transaction_amount = Column(DECIMAL(15, 2), default=0)
+    highest_transaction = Column(DECIMAL(15, 2), default=0)
+    lowest_transaction = Column(DECIMAL(15, 2), default=0)
     
+    # Bank reconciliation
+    bank_balance_at_date = Column(DECIMAL(15, 2), nullable=True)
+    is_reconciled = Column(Boolean, default=False)
+    reconciled_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Metadata
+    notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     # Relationships
-    branch = relationship("Branch", foreign_keys=[branch_id], back_populates="wallet_summaries")
+    wallet = relationship(
+        "Wallet", 
+        foreign_keys=[wallet_id],
+        back_populates="summaries"
+    )
+    branch = relationship("Branch", back_populates="wallet_summaries")
     
     __table_args__ = (
-        UniqueConstraint('branch_id', 'summary_date', name='unique_branch_date_summary'),
-        Index('idx_wallet_summary_branch', 'branch_id'),
+        UniqueConstraint('wallet_id', 'summary_date', name='unique_wallet_date_summary'),
+        Index('idx_wallet_summary_wallet', 'wallet_id'),
         Index('idx_wallet_summary_date', 'summary_date'),
+        Index('idx_wallet_summary_branch', 'branch_id'),
     )

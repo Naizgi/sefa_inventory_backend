@@ -105,14 +105,17 @@ def create_purchase(
         if not product:
             raise HTTPException(status_code=404, detail=f"Product {item_data.product_id} not found")
         
-        item_total = item_data.quantity * item_data.unit_cost
+        # Convert to Decimal to handle fractions
+        quantity = Decimal(str(item_data.quantity))
+        unit_cost = Decimal(str(item_data.unit_cost))
+        item_total = quantity * unit_cost
         total_amount += item_total
         
         purchase_item = PurchaseItemModel(
             purchase_id=purchase.id,
             product_id=item_data.product_id,
-            quantity=item_data.quantity,
-            unit_cost=item_data.unit_cost
+            quantity=quantity,
+            unit_cost=unit_cost
         )
         db.add(purchase_item)
         
@@ -123,19 +126,19 @@ def create_purchase(
         ).first()
         
         if stock:
-            stock.quantity += item_data.quantity
+            stock.quantity += quantity
             # Update VAT-specific quantities
             if has_vat:
-                stock.quantity_with_vat = (stock.quantity_with_vat or 0) + item_data.quantity
+                stock.quantity_with_vat = (stock.quantity_with_vat or Decimal('0')) + quantity
             else:
-                stock.quantity_without_vat = (stock.quantity_without_vat or 0) + item_data.quantity
+                stock.quantity_without_vat = (stock.quantity_without_vat or Decimal('0')) + quantity
         else:
             stock = Stock(
                 branch_id=branch_id,
                 product_id=item_data.product_id,
-                quantity=item_data.quantity,
-                quantity_with_vat=item_data.quantity if has_vat else 0,
-                quantity_without_vat=item_data.quantity if not has_vat else 0,
+                quantity=quantity,
+                quantity_with_vat=quantity if has_vat else Decimal('0'),
+                quantity_without_vat=quantity if not has_vat else Decimal('0'),
                 reorder_level=0
             )
             db.add(stock)
@@ -146,7 +149,7 @@ def create_purchase(
             branch_id=branch_id,
             product_id=item_data.product_id,
             user_id=current_user.id,
-            change_qty=item_data.quantity,
+            change_qty=quantity,
             movement_type="purchase",
             reference_id=purchase.id,
             notes=f"Purchase from {purchase_data.supplier_name} - {vat_status}"
@@ -217,12 +220,12 @@ def create_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Create a new purchase order with optional VAT and bank account"""
+    """Create a new purchase order with optional VAT and wallet payment"""
     
     if not current_user.branch_id:
         raise HTTPException(status_code=400, detail="User not assigned to a branch")
     
-    # Calculate subtotal from items
+    # Calculate subtotal from items (supporting decimal quantities)
     subtotal = Decimal('0')
     for item in purchase_data.items:
         quantity = Decimal(str(item.quantity_ordered))
@@ -248,10 +251,34 @@ def create_purchase_order(
     # Calculate totals with VAT
     totals = calculate_purchase_totals(subtotal, vat_rate, tax_amount, shipping, discount)
     
-    # Validate bank account if provided
+    # Check if using wallet payment
+    use_wallet_payment = getattr(purchase_data, 'use_wallet_payment', False)
+    wallet_id = getattr(purchase_data, 'wallet_id', None)
+    
+    # If using wallet payment, validate wallet and check balance
+    if use_wallet_payment and wallet_id:
+        from app.models import Wallet
+        wallet = db.query(Wallet).filter(
+            Wallet.id == wallet_id,
+            Wallet.branch_id == current_user.branch_id,
+            Wallet.is_active == True
+        ).first()
+        
+        if not wallet:
+            raise HTTPException(status_code=404, detail="Wallet not found or inactive")
+        
+        # Check if wallet has sufficient balance
+        if wallet.balance < totals['total_amount']:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Insufficient balance in wallet '{wallet.wallet_name}'. "
+                       f"Available: {float(wallet.balance)}, Required: {float(totals['total_amount'])}"
+            )
+    
+    # Get bank account info if not using wallet payment
     bank_account_name = None
     bank_name = None
-    if purchase_data.bank_account_id:
+    if not use_wallet_payment and hasattr(purchase_data, 'bank_account_id') and purchase_data.bank_account_id:
         bank_account = db.query(BankAccount).filter(
             BankAccount.id == purchase_data.bank_account_id,
             BankAccount.branch_id == current_user.branch_id,
@@ -262,7 +289,7 @@ def create_purchase_order(
         bank_account_name = bank_account.account_name
         bank_name = bank_account.bank_name
     
-    # Create purchase order with VAT and bank account fields
+    # Create purchase order with VAT and payment fields
     purchase_order = PurchaseOrder(
         order_number=generate_order_number(),
         branch_id=current_user.branch_id,
@@ -278,15 +305,19 @@ def create_purchase_order(
         notes=purchase_data.notes,
         created_by=current_user.id,
         status='pending',
-        bank_account_id=purchase_data.bank_account_id,
-        payment_reference=purchase_data.payment_reference,
-        payment_date=datetime.combine(purchase_data.payment_date, datetime.min.time()) if purchase_data.payment_date else None
+        # Payment fields
+        bank_account_id=purchase_data.bank_account_id if not use_wallet_payment else None,
+        payment_reference=getattr(purchase_data, 'payment_reference', None),
+        payment_date=datetime.combine(purchase_data.payment_date, datetime.min.time()) if hasattr(purchase_data, 'payment_date') and purchase_data.payment_date else None,
+        # Wallet payment tracking
+        use_wallet_payment=use_wallet_payment,
+        wallet_id=wallet_id if use_wallet_payment else None
     )
     
     db.add(purchase_order)
     db.flush()
     
-    # Add items
+    # Add items (supporting decimal quantities)
     for item_data in purchase_data.items:
         product = db.query(Product).filter(Product.id == item_data.product_id).first()
         if not product:
@@ -307,6 +338,32 @@ def create_purchase_order(
     
     db.commit()
     db.refresh(purchase_order)
+    
+    # ==================== DEDUCT FROM WALLET IF USING WALLET PAYMENT ====================
+    if use_wallet_payment and wallet_id:
+        try:
+            wallet = db.query(Wallet).filter(Wallet.id == wallet_id).first()
+            if wallet:
+                # Process wallet transaction (deduct amount)
+                transaction = process_wallet_transaction(
+                    db=db,
+                    wallet_id=wallet_id,
+                    transaction_type=WalletTransactionType.PURCHASE.value,
+                    amount=totals['total_amount'],
+                    description=f"Purchase Order Created: {purchase_order.order_number} - Supplier: {purchase_data.supplier}",
+                    user_id=current_user.id,
+                    reference_type="purchase_order",
+                    reference_id=purchase_order.id
+                )
+                print(f"✅ Wallet deducted for PO #{purchase_order.order_number}: {transaction.transaction_number} - Amount: {totals['total_amount']}")
+                
+                # Update purchase order with transaction reference
+                purchase_order.wallet_transaction_id = transaction.id
+                db.commit()
+        except Exception as wallet_error:
+            print(f"⚠️ Wallet deduction failed for PO #{purchase_order.order_number}: {wallet_error}")
+            # Re-raise to prevent order creation if wallet deduction fails
+            raise HTTPException(status_code=400, detail=f"Wallet deduction failed: {str(wallet_error)}")
     
     creator = db.query(User).filter(User.id == purchase_order.created_by).first()
     creator_name = creator.name if creator else "System"
@@ -351,7 +408,10 @@ def create_purchase_order(
         "bank_account_name": bank_account_name,
         "bank_name": bank_name,
         "payment_reference": purchase_order.payment_reference,
-        "payment_date": purchase_order.payment_date
+        "payment_date": purchase_order.payment_date,
+        "use_wallet_payment": purchase_order.use_wallet_payment,
+        "wallet_id": purchase_order.wallet_id,
+        "wallet_transaction_id": purchase_order.wallet_transaction_id
     }
 
 @router.get("/orders", response_model=List[PurchaseOrderResponse])
@@ -366,7 +426,7 @@ def get_purchase_orders(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get all purchase orders with VAT and bank account information"""
+    """Get all purchase orders with VAT and payment information"""
     
     try:
         query = db.query(PurchaseOrder)
@@ -392,11 +452,19 @@ def get_purchase_orders(
             # Get bank account info if exists
             bank_account_name = None
             bank_name = None
-            if order.bank_account_id:
+            if not order.use_wallet_payment and order.bank_account_id:
                 bank_account = db.query(BankAccount).filter(BankAccount.id == order.bank_account_id).first()
                 if bank_account:
                     bank_account_name = bank_account.account_name
                     bank_name = bank_account.bank_name
+            
+            # Get wallet info if using wallet payment
+            wallet_name = None
+            if order.use_wallet_payment and order.wallet_id:
+                from app.models import Wallet
+                wallet = db.query(Wallet).filter(Wallet.id == order.wallet_id).first()
+                if wallet:
+                    wallet_name = wallet.wallet_name
             
             items_response = []
             for item in order.items:
@@ -438,7 +506,11 @@ def get_purchase_orders(
                 "bank_account_name": bank_account_name,
                 "bank_name": bank_name,
                 "payment_reference": order.payment_reference,
-                "payment_date": order.payment_date
+                "payment_date": order.payment_date,
+                "use_wallet_payment": order.use_wallet_payment,
+                "wallet_id": order.wallet_id,
+                "wallet_name": wallet_name,
+                "wallet_transaction_id": order.wallet_transaction_id
             })
         
         return result
@@ -455,7 +527,7 @@ def get_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get purchase order by ID with VAT and bank account information"""
+    """Get purchase order by ID with VAT and payment information"""
     order = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -466,11 +538,19 @@ def get_purchase_order(
     # Get bank account info if exists
     bank_account_name = None
     bank_name = None
-    if order.bank_account_id:
+    if not order.use_wallet_payment and order.bank_account_id:
         bank_account = db.query(BankAccount).filter(BankAccount.id == order.bank_account_id).first()
         if bank_account:
             bank_account_name = bank_account.account_name
             bank_name = bank_account.bank_name
+    
+    # Get wallet info if using wallet payment
+    wallet_name = None
+    if order.use_wallet_payment and order.wallet_id:
+        from app.models import Wallet
+        wallet = db.query(Wallet).filter(Wallet.id == order.wallet_id).first()
+        if wallet:
+            wallet_name = wallet.wallet_name
     
     items_response = []
     for item in order.items:
@@ -512,7 +592,11 @@ def get_purchase_order(
         "bank_account_name": bank_account_name,
         "bank_name": bank_name,
         "payment_reference": order.payment_reference,
-        "payment_date": order.payment_date
+        "payment_date": order.payment_date,
+        "use_wallet_payment": order.use_wallet_payment,
+        "wallet_id": order.wallet_id,
+        "wallet_name": wallet_name,
+        "wallet_transaction_id": order.wallet_transaction_id
     }
 
 @router.post("/orders/{order_id}/receive")
@@ -522,7 +606,7 @@ def receive_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Receive items from purchase order and update inventory with VAT tracking and wallet deduction"""
+    """Receive items from purchase order and update inventory with VAT tracking"""
     
     purchase_order = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not purchase_order:
@@ -540,7 +624,7 @@ def receive_purchase_order(
     # Determine if this purchase has VAT
     has_vat = purchase_order.vat_rate and purchase_order.vat_rate > 0
     
-    # Calculate total cost of received items for wallet deduction
+    # Calculate total cost of received items
     total_received_cost = Decimal('0')
     
     for receive_item in receive_data.items:
@@ -582,40 +666,22 @@ def receive_purchase_order(
         
         if stock:
             # Update stock quantities
-            old_quantity = float(stock.quantity)
-            new_quantity = float(stock.quantity) + float(quantity_received)
-            stock.quantity = Decimal(str(new_quantity))
+            stock.quantity += quantity_received
             
             # Update VAT-specific quantities based on purchase order's VAT status
             if has_vat:
-                old_with_vat = float(stock.quantity_with_vat) if hasattr(stock, 'quantity_with_vat') and stock.quantity_with_vat else 0
-                new_with_vat = old_with_vat + float(quantity_received)
-                stock.quantity_with_vat = Decimal(str(new_with_vat))
+                stock.quantity_with_vat = (stock.quantity_with_vat or Decimal('0')) + quantity_received
             else:
-                old_without_vat = float(stock.quantity_without_vat) if hasattr(stock, 'quantity_without_vat') and stock.quantity_without_vat else 0
-                new_without_vat = old_without_vat + float(quantity_received)
-                stock.quantity_without_vat = Decimal(str(new_without_vat))
-            
-            if hasattr(stock, 'quantity_with_vat') and stock.quantity_with_vat is None:
-                stock.quantity_with_vat = 0
-            if hasattr(stock, 'quantity_without_vat') and stock.quantity_without_vat is None:
-                stock.quantity_without_vat = 0
+                stock.quantity_without_vat = (stock.quantity_without_vat or Decimal('0')) + quantity_received
                 
         else:
             # Create new stock record
-            if has_vat:
-                new_with_vat = quantity_received
-                new_without_vat = 0
-            else:
-                new_with_vat = 0
-                new_without_vat = quantity_received
-            
             stock = Stock(
                 branch_id=branch_id,
                 product_id=purchase_item.product_id,
                 quantity=quantity_received,
-                quantity_with_vat=new_with_vat,
-                quantity_without_vat=new_without_vat,
+                quantity_with_vat=quantity_received if has_vat else Decimal('0'),
+                quantity_without_vat=quantity_received if not has_vat else Decimal('0'),
                 reorder_level=0
             )
             db.add(stock)
@@ -656,30 +722,6 @@ def receive_purchase_order(
     
     db.commit()
     
-    # ==================== DEDUCT FROM WALLET ====================
-    # Deduct the total cost of received items from the wallet
-    if total_received_cost > 0:
-        try:
-            # Determine which wallet to use (regular wallet for purchases)
-            wallet = get_or_create_wallet(db, branch_id, "regular")
-            
-            # Process wallet transaction (deduct amount)
-            transaction = process_wallet_transaction(
-                db=db,
-                wallet_id=wallet.id,
-                transaction_type=WalletTransactionType.PURCHASE.value,
-                amount=total_received_cost,
-                description=f"Purchase Order Received: {purchase_order.order_number} - Supplier: {purchase_order.supplier}",
-                user_id=current_user.id,
-                reference_type="purchase",
-                reference_id=purchase_order.id
-            )
-            print(f"✅ Wallet deducted for PO #{purchase_order.order_number}: {transaction.transaction_number} - Amount: {total_received_cost}")
-            
-        except Exception as wallet_error:
-            print(f"⚠️ Wallet deduction failed for PO #{purchase_order.order_number}: {wallet_error}")
-            # Don't fail the receipt if wallet deduction fails, just log it
-    
     return {
         "success": True,
         "message": "Purchase order received successfully",
@@ -689,7 +731,7 @@ def receive_purchase_order(
         "has_vat": has_vat,
         "received_items": received_items,
         "total_items_received": len(received_items),
-        "total_amount_deducted": float(total_received_cost)
+        "total_amount": float(total_received_cost)
     }
 
 @router.put("/orders/{order_id}", response_model=PurchaseOrderResponse)
@@ -729,11 +771,19 @@ def update_purchase_order(
     # Get bank account info if exists
     bank_account_name = None
     bank_name = None
-    if purchase_order.bank_account_id:
+    if not purchase_order.use_wallet_payment and purchase_order.bank_account_id:
         bank_account = db.query(BankAccount).filter(BankAccount.id == purchase_order.bank_account_id).first()
         if bank_account:
             bank_account_name = bank_account.account_name
             bank_name = bank_account.bank_name
+    
+    # Get wallet info if using wallet payment
+    wallet_name = None
+    if purchase_order.use_wallet_payment and purchase_order.wallet_id:
+        from app.models import Wallet
+        wallet = db.query(Wallet).filter(Wallet.id == purchase_order.wallet_id).first()
+        if wallet:
+            wallet_name = wallet.wallet_name
     
     items_response = []
     for item in purchase_order.items:
@@ -775,7 +825,11 @@ def update_purchase_order(
         "bank_account_name": bank_account_name,
         "bank_name": bank_name,
         "payment_reference": purchase_order.payment_reference,
-        "payment_date": purchase_order.payment_date
+        "payment_date": purchase_order.payment_date,
+        "use_wallet_payment": purchase_order.use_wallet_payment,
+        "wallet_id": purchase_order.wallet_id,
+        "wallet_name": wallet_name,
+        "wallet_transaction_id": purchase_order.wallet_transaction_id
     }
 
 @router.delete("/orders/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -808,7 +862,7 @@ def get_purchase_report(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get purchase report with VAT and bank account information"""
+    """Get purchase report with VAT and payment information"""
     
     if not to_date:
         to_date = date.today()
@@ -830,10 +884,15 @@ def get_purchase_report(
     total_vat_amount = sum(po.vat_amount for po in purchase_orders if po.vat_amount)
     total_legacy_cost = sum(p.total_amount for p in purchases)
     
-    # Bank account summary
+    # Payment method summary
+    wallet_payment_total = sum(po.total_amount for po in purchase_orders if po.use_wallet_payment)
+    bank_payment_total = sum(po.total_amount for po in purchase_orders if not po.use_wallet_payment and po.bank_account_id)
+    cash_payment_total = sum(po.total_amount for po in purchase_orders if not po.use_wallet_payment and not po.bank_account_id)
+    
+    # Bank account summary (only for non-wallet payments)
     bank_account_summary = {}
     for po in purchase_orders:
-        if po.bank_account_id:
+        if not po.use_wallet_payment and po.bank_account_id:
             bank_account = db.query(BankAccount).filter(BankAccount.id == po.bank_account_id).first()
             if bank_account:
                 key = f"{bank_account.bank_name} - {bank_account.account_number}"
@@ -887,6 +946,14 @@ def get_purchase_report(
             "total_all_purchases": float(total_purchase_cost + total_legacy_cost),
             "average_order_value": float(total_purchase_cost / len(purchase_orders)) if purchase_orders else 0
         },
+        "payment_summary": {
+            "wallet_payments": float(wallet_payment_total),
+            "bank_payments": float(bank_payment_total),
+            "cash_payments": float(cash_payment_total),
+            "wallet_order_count": sum(1 for po in purchase_orders if po.use_wallet_payment),
+            "bank_order_count": sum(1 for po in purchase_orders if not po.use_wallet_payment and po.bank_account_id),
+            "cash_order_count": sum(1 for po in purchase_orders if not po.use_wallet_payment and not po.bank_account_id)
+        },
         "bank_account_summary": [
             {
                 "bank_name": data["bank_name"],
@@ -921,7 +988,7 @@ def get_purchase_report(
                 "vat_rate": float(po.vat_rate) if po.vat_rate else 0,
                 "status": po.status,
                 "items_count": len(po.items),
-                "bank_name": db.query(BankAccount).filter(BankAccount.id == po.bank_account_id).first().bank_name if po.bank_account_id else None,
+                "payment_method": "Wallet" if po.use_wallet_payment else ("Bank" if po.bank_account_id else "Cash"),
                 "payment_reference": po.payment_reference
             }
             for po in purchase_orders[:20]

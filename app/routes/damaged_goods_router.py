@@ -1,3 +1,4 @@
+# app/routes/damaged_goods.py
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
@@ -14,13 +15,13 @@ from app.schemas import (
     DamagedGoodsCreate, DamagedGoodsUpdate, DamagedGoodsResponse, 
     DamagedGoodsApprove
 )
-# FIXED: Import both from dependencies
 from app.utils.dependencies import get_current_user, require_privileged
 
 router = APIRouter(prefix="/api/damaged-goods", tags=["Damaged Goods"])
 
 def generate_report_number():
     return f"DMG-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
 
 # Create damaged goods report (Sales and privileged users)
 @router.post("/reports", response_model=DamagedGoodsResponse, status_code=status.HTTP_201_CREATED)

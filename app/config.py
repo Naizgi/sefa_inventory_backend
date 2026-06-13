@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # Security - These MUST have values
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production-minimum-32-chars")
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
     # App
     APP_NAME: str = "Sefa Inventory Management System"

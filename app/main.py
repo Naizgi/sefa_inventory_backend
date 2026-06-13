@@ -21,10 +21,11 @@ from app.routes import settings_router
 from app.routes import (
     alerts_router, auth_router, branches_router, dashboard_router,
     loan_router, products_router, purchase_router, reports_router,
-    sales_router, stock_router, temp_items_router, users_router
+    sales_router, stock_router, temp_items_router, users_router,
+    damaged_goods_router  # ADD THIS LINE
 )
 from app.routes.vat import router as vat_router
-from app.routes.wallet import router as wallet_router  # NEW: Import Wallet router
+from app.routes.wallet import router as wallet_router
 
 # ==================== SCHEDULER ====================
 scheduler = BackgroundScheduler()
@@ -108,7 +109,7 @@ def startup():
     # Initialize database tables
     logger.info("Creating database tables...")
     try:
-        init_db()  # Use the new init_db function
+        init_db()
         logger.info("✅ Database tables created successfully")
     except Exception as e:
         logger.error(f"❌ Failed to create database tables: {e}")
@@ -137,7 +138,6 @@ def startup():
 def shutdown():
     logger.info("Shutting down application...")
     stop_scheduler()
-    # Dispose the engine to close all connections
     engine.dispose()
     logger.info("Database connections closed")
 
@@ -156,7 +156,9 @@ app.add_middleware(
         "http://smartlink-inventory.up.railway.app",
         "https://sefa-inventory.com",
         "http://sefa-inventory.com",
-        
+        "https://www.sefa-inventory.com",
+        "http://localhost:52012",
+         "*",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -177,8 +179,9 @@ app.include_router(loan_router)
 app.include_router(purchase_router)
 app.include_router(temp_items_router)
 app.include_router(settings_router)
-app.include_router(vat_router)  # VAT router
-app.include_router(wallet_router)  # NEW: Wallet router
+app.include_router(vat_router)
+app.include_router(wallet_router)
+app.include_router(damaged_goods_router)  # ADD THIS LINE - Register the damaged goods router
 
 # ==================== TEST EMAIL ENDPOINT ====================
 @app.post("/api/test/email")
@@ -249,10 +252,8 @@ def db_info(current_user: User = Depends(get_current_user)):
         db_path = settings.DATABASE_URL.replace("sqlite:///", "")
         
         try:
-            # Get database size
             db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
             
-            # Get table counts
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")

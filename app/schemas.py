@@ -1,3 +1,4 @@
+# app/schemas.py
 from enum import Enum
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from datetime import datetime, date
@@ -58,17 +59,29 @@ class DamagedGoodsStatus(str, Enum):
     REJECTED = "rejected"
     PROCESSED = "processed"
 
-# ==================== WALLET ENUMS ====================
+# ==================== ENHANCED WALLET ENUMS ====================
 class WalletType(str, Enum):
-    VAT = "vat"
-    REGULAR = "regular"
+    VAT = "vat"                    # VAT-tracked wallet
+    REGULAR = "regular"            # Regular stock wallet
+    PETTY_CASH = "petty_cash"      # Petty cash wallet
+    EXPENSE = "expense"            # Expense wallet
+    CUSTOM = "custom"              # Custom wallet type
+
+class WalletPurpose(str, Enum):
+    VAT_OPERATIONS = "vat_operations"
+    REGULAR_STOCK = "regular_stock"
+    PETTY_CASH = "petty_cash"
+    OPERATING_EXPENSES = "operating_expenses"
+    MARKETING = "marketing"
+    MAINTENANCE = "maintenance"
+    OTHER = "other"
 
 class WalletTransactionType(str, Enum):
-    DEPOSIT = "deposit"           # Money added to wallet
-    WITHDRAWAL = "withdrawal"      # Money taken out
+    DEPOSIT = "deposit"           # Money added to wallet (manual deposit)
+    WITHDRAWAL = "withdrawal"      # Money taken out (manual withdrawal)
     PURCHASE = "purchase"          # Money spent on purchase order
     RESTOCK = "restock"            # Money spent on restocking
-    REFUND = "refund"              # Money refunded to customer
+    REFUND = "refund"              # Money refunded to customer (deducted from wallet)
     ADJUSTMENT = "adjustment"      # Manual adjustment
     TRANSFER = "transfer"          # Transfer between wallets
 
@@ -77,6 +90,14 @@ class WalletTransactionStatus(str, Enum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
+
+class WalletTransactionMethod(str, Enum):
+    CASH = "cash"
+    BANK_TRANSFER = "bank_transfer"
+    CHEQUE = "cheque"
+    CARD = "card"
+    MOBILE_MONEY = "mobile_money"
+    INTERNAL_TRANSFER = "internal_transfer"
 
 # ==================== BRANCH SCHEMAS ====================
 class BranchBase(BaseModel):
@@ -100,14 +121,19 @@ class Branch(BranchBase):
         from_attributes = True
 
 
-# ==================== BANK ACCOUNT SCHEMAS ====================
+# ==================== ENHANCED BANK ACCOUNT SCHEMAS (with account_category) ====================
 class BankAccountBase(BaseModel):
     bank_name: str = Field(..., min_length=1, max_length=100)
+    branch_name: Optional[str] = Field(None, max_length=100)
     account_number: str = Field(..., min_length=1, max_length=50)
     account_name: str = Field(..., min_length=1, max_length=255)
     account_type: str = Field(default="checking", pattern="^(checking|savings|business)$")
+    iban: Optional[str] = Field(None, max_length=50)
+    swift_code: Optional[str] = Field(None, max_length=20)
     currency: str = Field(default="ETB", min_length=3, max_length=3)
     is_active: bool = True
+    is_primary: bool = False
+    account_category: str = Field(default="regular", pattern="^(regular|vat)$")  # NEW: "regular" or "vat"
     notes: Optional[str] = None
 
 class BankAccountCreate(BankAccountBase):
@@ -115,17 +141,25 @@ class BankAccountCreate(BankAccountBase):
 
 class BankAccountUpdate(BaseModel):
     bank_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    branch_name: Optional[str] = Field(None, max_length=100)
     account_number: Optional[str] = Field(None, min_length=1, max_length=50)
     account_name: Optional[str] = Field(None, min_length=1, max_length=255)
     account_type: Optional[str] = Field(None, pattern="^(checking|savings|business)$")
+    iban: Optional[str] = Field(None, max_length=50)
+    swift_code: Optional[str] = Field(None, max_length=20)
     currency: Optional[str] = Field(None, min_length=3, max_length=3)
     is_active: Optional[bool] = None
+    is_primary: Optional[bool] = None
+    account_category: Optional[str] = Field(None, pattern="^(regular|vat)$")  # NEW
     notes: Optional[str] = None
 
-class BankAccount(BankAccountBase):
+class BankAccountResponse(BankAccountBase):
     id: int
     branch_id: int
-    branch_name: Optional[str] = None
+    current_balance: float = 0
+    last_reconciled_at: Optional[datetime] = None
+    last_reconciled_balance: Optional[float] = None
+    created_by: int
     created_at: datetime
     updated_at: Optional[datetime] = None
     
@@ -322,7 +356,7 @@ class SaleResponse(BaseModel):
     
     payment_method: PaymentMethod
     bank_account_id: Optional[int]
-    bank_account_details: Optional[BankAccount] = None
+    bank_account_details: Optional[BankAccountResponse] = None
     transaction_reference: Optional[str]
     
     status: SaleStatus
@@ -382,7 +416,7 @@ class RefundResponse(BaseModel):
     refund_method: PaymentMethod
     
     bank_account_id: Optional[int]
-    bank_account_details: Optional[BankAccount] = None
+    bank_account_details: Optional[BankAccountResponse] = None
     transaction_reference: Optional[str]
     
     status: str
@@ -558,6 +592,8 @@ class PurchaseOrderBase(BaseModel):
 
 class PurchaseOrderCreate(PurchaseOrderBase):
     items: List[PurchaseOrderItemCreate]
+    use_wallet_payment: bool = False
+    wallet_id: Optional[int] = None
 
 class PurchaseOrderUpdate(BaseModel):
     status: Optional[PurchaseStatus] = None
@@ -588,6 +624,11 @@ class PurchaseOrderResponse(PurchaseOrderBase):
     bank_name: Optional[str] = None
     payment_reference: Optional[str] = None
     payment_date: Optional[datetime] = None
+    
+    use_wallet_payment: bool = False
+    wallet_id: Optional[int] = None
+    wallet_name: Optional[str] = None
+    wallet_transaction_id: Optional[int] = None
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -921,6 +962,10 @@ class VATPurchaseBase(BaseModel):
 
 class VATPurchaseCreate(VATPurchaseBase):
     purchase_order_id: Optional[int] = None
+    use_wallet_payment: bool = False
+    wallet_id: Optional[int] = None
+    bank_account_id: Optional[int] = None
+    payment_reference: Optional[str] = None
 
 
 class VATPurchaseUpdate(BaseModel):
@@ -955,6 +1000,14 @@ class VATPurchaseResponse(VATPurchaseBase):
     updated_at: Optional[datetime] = None
     created_by: int
     created_by_name: Optional[str] = None
+    
+    # Payment fields
+    use_wallet_payment: bool = False
+    wallet_id: Optional[int] = None
+    wallet_name: Optional[str] = None
+    wallet_transaction_id: Optional[int] = None
+    bank_account_id: Optional[int] = None
+    payment_reference: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -1012,6 +1065,7 @@ class VATSaleResponse(VATSaleBase):
     created_at: datetime
     created_by: int
     created_by_name: Optional[str] = None
+    wallet_transaction_id: Optional[int] = None
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -1144,106 +1198,223 @@ class VATDashboardSummary(BaseModel):
     top_product_groups_by_vat: List[VATProductGroupReport] = []
 
 
-# ==================== WALLET SCHEMAS ====================
+# ==================== ENHANCED WALLET SCHEMAS ====================
 
 class WalletBase(BaseModel):
+    wallet_name: str = Field(..., min_length=1, max_length=100)
     wallet_type: WalletType
+    wallet_purpose: WalletPurpose = Field(default=WalletPurpose.OTHER)
     currency: str = Field(default="ETB", min_length=3, max_length=3)
+    description: Optional[str] = None
 
 class WalletCreate(WalletBase):
     branch_id: int
+    bank_account_id: Optional[int] = None
     initial_balance: float = Field(default=0, ge=0)
+    requires_approval: bool = False
+    max_balance: Optional[float] = Field(None, ge=0)
+    min_balance: Optional[float] = Field(None, ge=0)
+    daily_limit: Optional[float] = Field(None, ge=0)
+    transaction_limit: Optional[float] = Field(None, ge=0)
 
 class WalletUpdate(BaseModel):
+    wallet_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    wallet_purpose: Optional[WalletPurpose] = None
     is_active: Optional[bool] = None
+    bank_account_id: Optional[int] = None
+    description: Optional[str] = None
+    requires_approval: Optional[bool] = None
+    max_balance: Optional[float] = Field(None, ge=0)
+    min_balance: Optional[float] = Field(None, ge=0)
+    daily_limit: Optional[float] = Field(None, ge=0)
+    transaction_limit: Optional[float] = Field(None, ge=0)
 
 class WalletResponse(WalletBase):
     id: int
+    wallet_number: str
     branch_id: int
     branch_name: Optional[str] = None
+    bank_account_id: Optional[int] = None
+    bank_account_details: Optional[BankAccountResponse] = None
     balance: float
     is_active: bool
+    requires_approval: bool
+    max_balance: Optional[float] = None
+    min_balance: Optional[float] = None
+    daily_limit: Optional[float] = None
+    transaction_limit: Optional[float] = None
+    created_by: int
+    created_by_name: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     
-    model_config = ConfigDict(from_attributes=True)
+    class Config:
+        from_attributes = True
 
 
 class WalletTransactionBase(BaseModel):
     amount: float = Field(..., gt=0)
+    transaction_method: WalletTransactionMethod = Field(default=WalletTransactionMethod.CASH)
     description: Optional[str] = None
     reference_type: Optional[str] = None
     reference_id: Optional[int] = None
+    reference_number: Optional[str] = None
+    bank_reference: Optional[str] = None
+    notes: Optional[str] = None
 
 class WalletDeposit(WalletTransactionBase):
     wallet_id: int
+    bank_account_id: Optional[int] = None
 
 class WalletWithdrawal(WalletTransactionBase):
     wallet_id: int
+    bank_account_id: Optional[int] = None
 
 class WalletTransfer(BaseModel):
     from_wallet_id: int
     to_wallet_id: int
     amount: float = Field(..., gt=0)
+    transaction_method: WalletTransactionMethod = Field(default=WalletTransactionMethod.INTERNAL_TRANSFER)
     description: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class WalletTransactionResponse(WalletTransactionBase):
     id: int
     transaction_number: str
     wallet_id: int
+    wallet_name: Optional[str] = None
     transaction_type: str
     amount: float
     balance_before: float
     balance_after: float
     status: str
-    created_at: datetime
+    approval_status: str
+    from_wallet_id: Optional[int] = None
+    to_wallet_id: Optional[int] = None
     created_by: Optional[str] = None
+    created_at: datetime
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
     
-    model_config = ConfigDict(from_attributes=True)
+    class Config:
+        from_attributes = True
+
+
+class BankTransactionBase(BaseModel):
+    transaction_date: datetime
+    transaction_type: str = Field(..., pattern="^(credit|debit)$")
+    amount: float = Field(..., gt=0)
+    description: Optional[str] = None
+    reference: Optional[str] = None
+    statement_date: Optional[date] = None
+    statement_balance: Optional[float] = None
+    notes: Optional[str] = None
+
+class BankTransactionCreate(BankTransactionBase):
+    bank_account_id: int
+
+class BankTransactionReconcile(BaseModel):
+    wallet_transaction_id: int
+    notes: Optional[str] = None
+
+class BankTransactionResponse(BankTransactionBase):
+    id: int
+    bank_account_id: int
+    is_reconciled: bool
+    reconciled_at: Optional[datetime] = None
+    reconciled_by: Optional[str] = None
+    wallet_transaction_id: Optional[int] = None
+    wallet_transaction_number: Optional[str] = None
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
 
 
 class WalletBalanceResponse(BaseModel):
-    vat_wallet: WalletResponse
-    regular_wallet: WalletResponse
+    wallet_id: int
+    wallet_name: str
+    wallet_type: str
+    balance: float
+    currency: str
+    bank_account_name: Optional[str] = None
+    last_transaction_at: Optional[datetime] = None
+
+
+class BranchWalletSummaryResponse(BaseModel):
+    branch_id: int
+    branch_name: str
+    wallets: List[WalletBalanceResponse]
     total_balance: float
 
 
 class WalletSummaryResponse(BaseModel):
     id: int
+    wallet_id: int
+    wallet_name: Optional[str] = None
     branch_id: int
     branch_name: Optional[str] = None
     summary_date: date
     
-    opening_balance_vat: float
-    opening_balance_regular: float
+    opening_balance: float
     
-    deposits_vat: float
-    deposits_regular: float
-    total_income_vat: float
-    total_income_regular: float
+    total_deposits: float
+    total_transfers_in: float
+    total_income: float
     
-    purchase_expenses_vat: float
-    purchase_expenses_regular: float
-    restock_expenses_vat: float
-    restock_expenses_regular: float
-    refunds_vat: float
-    refunds_regular: float
-    withdrawals_vat: float
-    withdrawals_regular: float
-    total_expenses_vat: float
-    total_expenses_regular: float
+    total_withdrawals: float
+    total_transfers_out: float
+    total_purchases: float
+    total_restocks: float
+    total_refunds: float
+    total_expenses: float
     
-    closing_balance_vat: float
-    closing_balance_regular: float
+    closing_balance: float
     
-    net_profit_vat: float
-    net_profit_regular: float
-    total_profit: float
+    transaction_count: int
+    average_transaction_amount: float
+    highest_transaction: float
+    lowest_transaction: float
+    
+    bank_balance_at_date: Optional[float] = None
+    is_reconciled: bool
+    reconciled_at: Optional[datetime] = None
     
     created_at: datetime
+    updated_at: Optional[datetime] = None
     
-    model_config = ConfigDict(from_attributes=True)
+    class Config:
+        from_attributes = True
+
+
+class WalletPerformanceReport(BaseModel):
+    period_start: date
+    period_end: date
+    wallet_id: Optional[int] = None
+    wallet_name: Optional[str] = None
+    branch_id: Optional[int] = None
+    branch_name: Optional[str] = None
+    
+    opening_balance: float
+    closing_balance: float
+    net_change: float
+    
+    total_deposits: float
+    total_withdrawals: float
+    total_transfers_in: float
+    total_transfers_out: float
+    total_purchases: float
+    total_restocks: float
+    total_refunds: float
+    
+    transaction_count: int
+    average_transaction_size: float
+    largest_deposit: float
+    largest_withdrawal: float
+    
+    daily_balances: List[dict] = []
+    transaction_history: List[WalletTransactionResponse] = []
 
 
 # ==================== VAT CALCULATION HELPERS ====================

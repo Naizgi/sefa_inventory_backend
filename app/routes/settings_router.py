@@ -1,11 +1,13 @@
+# app/routes/settings.py
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 from typing import Dict, Any, List, Optional
 from app.database import get_db, engine, SessionLocal
 from app.services import SettingsService
-from app.utils.dependencies import require_admin, get_current_user
-from app.models import User
+from app.utils.dependencies import require_admin, get_current_user, get_current_user_optional
+from app.models import User, Branch, BankAccount
 from app.config import settings as app_settings
 from pydantic import BaseModel
 import json
@@ -23,6 +25,31 @@ router = APIRouter(prefix="/api/settings", tags=["Settings"])
 
 class SettingsUpdateRequest(BaseModel):
     settings: Dict[str, Any]
+
+class BankAccountCreate(BaseModel):
+    bank_name: str
+    branch_name: Optional[str] = None
+    account_number: str
+    account_name: str
+    account_type: str = "checking"
+    currency: str = "ETB"
+    is_active: bool = True
+    is_primary: bool = False
+    account_category: str = "regular"  # "vat" or "regular"
+    branch_id: int
+    notes: Optional[str] = None
+
+class BankAccountUpdate(BaseModel):
+    bank_name: Optional[str] = None
+    branch_name: Optional[str] = None
+    account_number: Optional[str] = None
+    account_name: Optional[str] = None
+    account_type: Optional[str] = None
+    currency: Optional[str] = None
+    is_active: Optional[bool] = None
+    is_primary: Optional[bool] = None
+    account_category: Optional[str] = None
+    notes: Optional[str] = None
 
 # ==================== GENERAL SETTINGS ====================
 
@@ -51,6 +78,310 @@ def update_general_settings(
         SettingsService.set_multiple_settings(db, "general", data.settings, current_user.id)
         return {"message": "General settings updated successfully", "success": True}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== BANK ACCOUNT MANAGEMENT (using BankAccount table) ====================
+
+@router.get("/bank-accounts")
+@router.get("/bank-accounts/")
+def get_bank_accounts(
+    account_category: Optional[str] = Query(None, description="Filter by category: vat or regular"),
+    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    branch_id: Optional[int] = Query(None, description="Filter by branch ID"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Get all bank accounts from BankAccount table with optional filtering"""
+    try:
+        query = db.query(BankAccount)
+        
+        # Apply filters
+        if account_category:
+            query = query.filter(BankAccount.account_category == account_category)
+        if is_active is not None:
+            query = query.filter(BankAccount.is_active == is_active)
+        if branch_id:
+            query = query.filter(BankAccount.branch_id == branch_id)
+        elif not current_user.is_admin() and current_user.branch_id:
+            query = query.filter(BankAccount.branch_id == current_user.branch_id)
+        
+        bank_accounts = query.order_by(BankAccount.bank_name, BankAccount.account_number).all()
+        
+        # Convert to response format
+        result = []
+        for acc in bank_accounts:
+            result.append({
+                "id": acc.id,
+                "bank_name": acc.bank_name,
+                "branch_name": acc.branch_name,
+                "account_number": acc.account_number,
+                "account_name": acc.account_name,
+                "account_type": acc.account_type,
+                "currency": acc.currency,
+                "is_active": acc.is_active,
+                "is_primary": acc.is_primary,
+                "account_category": getattr(acc, 'account_category', 'regular'),
+                "branch_id": acc.branch_id,
+                "notes": acc.notes,
+                "created_at": acc.created_at.isoformat() if acc.created_at else None,
+                "updated_at": acc.updated_at.isoformat() if acc.updated_at else None
+            })
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/bank-accounts/{account_id}")
+@router.get("/bank-accounts/{account_id}/")
+def get_bank_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Get a single bank account by ID"""
+    try:
+        account = db.query(BankAccount).filter(BankAccount.id == account_id).first()
+        if not account:
+            raise HTTPException(status_code=404, detail="Bank account not found")
+        
+        return {
+            "id": account.id,
+            "bank_name": account.bank_name,
+            "branch_name": account.branch_name,
+            "account_number": account.account_number,
+            "account_name": account.account_name,
+            "account_type": account.account_type,
+            "currency": account.currency,
+            "is_active": account.is_active,
+            "is_primary": account.is_primary,
+            "account_category": getattr(account, 'account_category', 'regular'),
+            "branch_id": account.branch_id,
+            "notes": account.notes,
+            "created_at": account.created_at.isoformat() if account.created_at else None,
+            "updated_at": account.updated_at.isoformat() if account.updated_at else None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/bank-accounts")
+@router.post("/bank-accounts/")
+def create_bank_account(
+    account_data: BankAccountCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Create a new bank account in BankAccount table"""
+    try:
+        # Check if branch exists
+        branch = db.query(Branch).filter(Branch.id == account_data.branch_id).first()
+        if not branch:
+            raise HTTPException(status_code=404, detail="Branch not found")
+        
+        # Check for duplicate account number in the same branch
+        existing = db.query(BankAccount).filter(
+            BankAccount.branch_id == account_data.branch_id,
+            BankAccount.account_number == account_data.account_number
+        ).first()
+        
+        if existing:
+            raise HTTPException(status_code=400, detail="Account number already exists for this branch")
+        
+        # Create new bank account
+        new_account = BankAccount(
+            bank_name=account_data.bank_name,
+            branch_name=account_data.branch_name,
+            account_number=account_data.account_number,
+            account_name=account_data.account_name,
+            account_type=account_data.account_type,
+            currency=account_data.currency,
+            is_active=account_data.is_active,
+            is_primary=account_data.is_primary,
+            account_category=account_data.account_category,
+            branch_id=account_data.branch_id,
+            notes=account_data.notes,
+            created_by=current_user.id,
+            created_at=datetime.now(),
+            updated_at=datetime.now()
+        )
+        
+        db.add(new_account)
+        db.commit()
+        db.refresh(new_account)
+        
+        return {
+            "id": new_account.id,
+            "bank_name": new_account.bank_name,
+            "branch_name": new_account.branch_name,
+            "account_number": new_account.account_number,
+            "account_name": new_account.account_name,
+            "account_type": new_account.account_type,
+            "currency": new_account.currency,
+            "is_active": new_account.is_active,
+            "is_primary": new_account.is_primary,
+            "account_category": new_account.account_category,
+            "branch_id": new_account.branch_id,
+            "notes": new_account.notes,
+            "created_at": new_account.created_at.isoformat() if new_account.created_at else None,
+            "updated_at": new_account.updated_at.isoformat() if new_account.updated_at else None
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/bank-accounts/{account_id}")
+@router.put("/bank-accounts/{account_id}/")
+def update_bank_account(
+    account_id: int,
+    account_update: BankAccountUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Update a bank account in BankAccount table"""
+    try:
+        account = db.query(BankAccount).filter(BankAccount.id == account_id).first()
+        if not account:
+            raise HTTPException(status_code=404, detail="Bank account not found")
+        
+        # Update fields
+        update_data = account_update.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            if value is not None:
+                setattr(account, field, value)
+        
+        account.updated_at = datetime.now()
+        db.commit()
+        db.refresh(account)
+        
+        return {
+            "id": account.id,
+            "bank_name": account.bank_name,
+            "branch_name": account.branch_name,
+            "account_number": account.account_number,
+            "account_name": account.account_name,
+            "account_type": account.account_type,
+            "currency": account.currency,
+            "is_active": account.is_active,
+            "is_primary": account.is_primary,
+            "account_category": getattr(account, 'account_category', 'regular'),
+            "branch_id": account.branch_id,
+            "notes": account.notes,
+            "created_at": account.created_at.isoformat() if account.created_at else None,
+            "updated_at": account.updated_at.isoformat() if account.updated_at else None
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/bank-accounts/{account_id}")
+@router.delete("/bank-accounts/{account_id}/")
+def delete_bank_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Soft delete a bank account (set is_active to false)"""
+    try:
+        account = db.query(BankAccount).filter(BankAccount.id == account_id).first()
+        if not account:
+            raise HTTPException(status_code=404, detail="Bank account not found")
+        
+        account.is_active = False
+        account.updated_at = datetime.now()
+        db.commit()
+        
+        return {"message": "Bank account deactivated successfully", "success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.patch("/bank-accounts/{account_id}/activate")
+@router.patch("/bank-accounts/{account_id}/activate/")
+def activate_bank_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Activate a bank account"""
+    try:
+        account = db.query(BankAccount).filter(BankAccount.id == account_id).first()
+        if not account:
+            raise HTTPException(status_code=404, detail="Bank account not found")
+        
+        account.is_active = True
+        account.updated_at = datetime.now()
+        db.commit()
+        
+        return {"message": "Bank account activated successfully", "success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== PUBLIC BANK ACCOUNTS ENDPOINT ====================
+# FIXED: Now accessible without authentication (for POS system)
+
+@router.get("/bank-accounts/public")
+@router.get("/bank-accounts/public/")
+def get_public_bank_accounts(
+    account_category: Optional[str] = Query(None, description="Filter by category: vat or regular"),
+    is_active: bool = Query(True, description="Filter by active status"),
+    db: Session = Depends(get_db),
+    # No authentication dependency - completely public
+):
+    """
+    Get bank accounts for POS transactions.
+    COMPLETELY PUBLIC - No authentication required.
+    This endpoint is used by the POS system for bank transfer payments.
+    """
+    try:
+        print(f"=== FETCHING PUBLIC BANK ACCOUNTS (NO AUTH REQUIRED) ===")
+        
+        # Start with active bank accounts
+        query = db.query(BankAccount).filter(BankAccount.is_active == is_active)
+        
+        # Filter by category if provided
+        if account_category:
+            query = query.filter(BankAccount.account_category == account_category)
+        
+        bank_accounts = query.order_by(
+            BankAccount.is_primary.desc(), 
+            BankAccount.bank_name
+        ).all()
+        
+        # Format for display (simplified for POS)
+        formatted_accounts = []
+        for acc in bank_accounts:
+            formatted_accounts.append({
+                "id": acc.id,
+                "bank_name": acc.bank_name,
+                "branch_name": acc.branch_name,
+                "account_number": acc.account_number,
+                "account_name": acc.account_name,
+                "account_type": acc.account_type,
+                "currency": acc.currency,
+                "is_active": acc.is_active,
+                "is_primary": acc.is_primary,
+                "account_category": getattr(acc, 'account_category', 'regular')
+            })
+        
+        print(f"Returning {len(formatted_accounts)} active bank accounts")
+        return formatted_accounts
+        
+    except Exception as e:
+        print(f"Error fetching public bank accounts: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== NOTIFICATION SETTINGS ====================
@@ -440,46 +771,4 @@ def export_all_data(
         data = SettingsService.export_all_data(db)
         return data
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ==================== PUBLIC BANK ACCOUNTS ENDPOINT ====================
-
-@router.get("/bank-accounts/public")
-@router.get("/bank-accounts/public/")
-def get_public_bank_accounts(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get bank accounts for POS transactions (accessible by all authenticated users)"""
-    try:
-        print("=== FETCHING BANK ACCOUNTS ===")
-        # Get bank accounts from general settings
-        settings = SettingsService.get_category_settings(db, "general")
-        print(f"Settings retrieved: {settings.keys() if settings else 'None'}")
-        
-        bank_accounts = []
-        if settings.get("bank_accounts"):
-            print(f"Found bank_accounts in settings: {type(settings['bank_accounts'])}")
-            if isinstance(settings["bank_accounts"], list):
-                bank_accounts = settings["bank_accounts"]
-                print(f"Bank accounts as list: {len(bank_accounts)} accounts")
-            elif isinstance(settings["bank_accounts"], str):
-                try:
-                    bank_accounts = json.loads(settings["bank_accounts"])
-                    print(f"Bank accounts parsed from string: {len(bank_accounts)} accounts")
-                except json.JSONDecodeError as e:
-                    print(f"Failed to parse bank_accounts JSON: {e}")
-                    bank_accounts = []
-        else:
-            print("No bank_accounts found in settings")
-        
-        # Return only active bank accounts
-        active_accounts = [acc for acc in bank_accounts if acc.get("is_active", True)]
-        print(f"Returning {len(active_accounts)} active bank accounts")
-        
-        return active_accounts
-    except Exception as e:
-        print(f"Error fetching public bank accounts: {str(e)}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

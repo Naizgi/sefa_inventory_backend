@@ -1,3 +1,4 @@
+# app/routes/vat.py
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
@@ -10,7 +11,7 @@ from app.database import get_db
 from app.models import (
     User, Branch, Product, PurchaseOrder, PurchaseOrderItem,
     Sale, SaleItem, VATPurchase, VATSale, VATSummary, VATRateHistory,
-    VATStatus, Stock, StockMovement
+    VATStatus, Stock, StockMovement, BankAccount
 )
 from app.schemas import (
     VATPurchaseCreate, VATPurchaseUpdate, VATPurchaseResponse,
@@ -29,6 +30,51 @@ from app.routes.wallet import get_or_create_wallet, process_wallet_transaction
 from app.models import WalletTransactionType
 
 router = APIRouter(prefix="/api/vat", tags=["VAT Tracking"])
+
+
+# ==================== PUBLIC BANK ACCOUNTS FOR POS ====================
+# This endpoint is completely public - no authentication required
+
+@router.get("/public-bank-accounts")
+def get_public_bank_accounts(
+    db: Session = Depends(get_db),
+):
+    """
+    Get bank accounts for POS system.
+    COMPLETELY PUBLIC - No authentication required.
+    This is used by the POS frontend for bank transfer payments.
+    """
+    try:
+        print("=" * 60)
+        print("🚀 PUBLIC BANK ACCOUNTS ENDPOINT (in vat.py) CALLED")
+        print("=" * 60)
+        
+        # Get all active bank accounts
+        accounts = db.query(BankAccount).filter(BankAccount.is_active == True).all()
+        
+        result = []
+        for acc in accounts:
+            result.append({
+                "id": acc.id,
+                "bank_name": acc.bank_name,
+                "branch_name": acc.branch_name or "",
+                "account_number": acc.account_number,
+                "account_name": acc.account_name,
+                "account_type": acc.account_type,
+                "currency": acc.currency,
+                "is_active": acc.is_active,
+                "is_primary": acc.is_primary,
+                "account_category": getattr(acc, 'account_category', 'regular')
+            })
+        
+        print(f"✅ Found {len(result)} bank accounts")
+        return result
+        
+    except Exception as e:
+        print(f"❌ Error in public bank accounts: {e}")
+        import traceback
+        traceback.print_exc()
+        return []  # Return empty array on error
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -287,7 +333,7 @@ def create_vat_sale(
     current_user: User = Depends(require_salesman)
 ):
     """Create a VAT sale record (when selling from stock)
-       If sale_id is not provided, it will auto-create a regular sale."""
+       When a VAT sale is created, the amount will be CREDITED to the VAT wallet."""
     
     vat_purchase = db.query(VATPurchase).filter(
         VATPurchase.id == sale_data.vat_purchase_id
@@ -413,6 +459,37 @@ def create_vat_sale(
     
     db.commit()
     db.refresh(vat_sale)
+    
+    # ==================== CREDIT TO VAT WALLET ====================
+    # Calculate total amount to credit (total sale amount including VAT)
+    total_sale_amount = vat_sale.total_amount_with_vat
+    
+    try:
+        # Get VAT wallet for this branch
+        wallet = get_or_create_wallet(db, sale.branch_id, "vat")
+        
+        # Process wallet transaction (CREDIT amount - deposit)
+        wallet_transaction = process_wallet_transaction(
+            db=db,
+            wallet_id=wallet.id,
+            transaction_type=WalletTransactionType.DEPOSIT.value,
+            amount=total_sale_amount,
+            description=f"VAT Sale #{vat_sale.vat_sale_number} - Customer: {sale.customer_name or 'Walk-in'} - Qty: {quantity} of {vat_purchase.product_name}",
+            user_id=current_user.id,
+            transaction_method="cash",
+            reference_type="vat_sale",
+            reference_id=vat_sale.id
+        )
+        print(f"✅ VAT Wallet credited: {wallet_transaction.transaction_number} - Amount: {total_sale_amount} to wallet '{wallet.wallet_name}'")
+        
+        # Update vat_sale with transaction reference
+        vat_sale.wallet_transaction_id = wallet_transaction.id
+        db.commit()
+        
+    except Exception as wallet_error:
+        print(f"⚠️ VAT Wallet credit failed: {wallet_error}")
+        # Don't fail the sale if wallet credit fails, just log it
+        # This ensures the sale is still recorded even if wallet has issues
     
     return vat_sale
 
