@@ -99,6 +99,11 @@ class WalletTransactionMethod(str, Enum):
     MOBILE_MONEY = "mobile_money"
     INTERNAL_TRANSFER = "internal_transfer"
 
+# ==================== DATE RANGE SCHEMA ====================
+class DateRange(BaseModel):
+    from_date: date
+    to_date: date
+
 # ==================== BRANCH SCHEMAS ====================
 class BranchBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
@@ -121,7 +126,7 @@ class Branch(BranchBase):
         from_attributes = True
 
 
-# ==================== ENHANCED BANK ACCOUNT SCHEMAS (with account_category) ====================
+# ==================== ENHANCED BANK ACCOUNT SCHEMAS ====================
 class BankAccountBase(BaseModel):
     bank_name: str = Field(..., min_length=1, max_length=100)
     branch_name: Optional[str] = Field(None, max_length=100)
@@ -133,7 +138,7 @@ class BankAccountBase(BaseModel):
     currency: str = Field(default="ETB", min_length=3, max_length=3)
     is_active: bool = True
     is_primary: bool = False
-    account_category: str = Field(default="regular", pattern="^(regular|vat)$")  # NEW: "regular" or "vat"
+    account_category: str = Field(default="regular", pattern="^(regular|vat)$")
     notes: Optional[str] = None
 
 class BankAccountCreate(BankAccountBase):
@@ -150,7 +155,7 @@ class BankAccountUpdate(BaseModel):
     currency: Optional[str] = Field(None, min_length=3, max_length=3)
     is_active: Optional[bool] = None
     is_primary: Optional[bool] = None
-    account_category: Optional[str] = Field(None, pattern="^(regular|vat)$")  # NEW
+    account_category: Optional[str] = Field(None, pattern="^(regular|vat)$")
     notes: Optional[str] = None
 
 class BankAccountResponse(BankAccountBase):
@@ -230,7 +235,7 @@ class User(UserBase):
         from_attributes = True
 
 
-# ==================== STOCK SCHEMAS (UPDATED WITH VAT BREAKDOWN) ====================
+# ==================== STOCK SCHEMAS ====================
 class StockBase(BaseModel):
     branch_id: int
     product_id: Optional[int] = None
@@ -288,7 +293,7 @@ class StockMovementResponse(StockMovementBase):
         from_attributes = True
 
 
-# ==================== ENHANCED SALE SCHEMAS ====================
+# ==================== SALE SCHEMAS ====================
 class SaleItemCreate(BaseModel):
     product_id: int
     quantity: float = Field(..., gt=0)
@@ -436,43 +441,7 @@ class RefundApprove(BaseModel):
     notes: Optional[str] = None
 
 
-# ==================== LEGACY SALE SCHEMAS ====================
-class LegacySaleItemCreate(BaseModel):
-    product_id: int
-    quantity: float = Field(..., gt=0)
-    unit_price: float = Field(..., gt=0)
-
-class LegacySaleItem(BaseModel):
-    id: int
-    sale_id: int
-    product_id: int
-    quantity: float
-    unit_price: float
-    line_total: float
-    
-    class Config:
-        from_attributes = True
-
-class LegacySaleCreate(BaseModel):
-    branch_id: Optional[int] = None
-    customer_name: Optional[str] = None
-    items: List[LegacySaleItemCreate] = Field(..., min_length=1)
-
-class LegacySale(BaseModel):
-    id: int
-    branch_id: int
-    user_id: int
-    customer_name: Optional[str]
-    total_amount: float
-    total_cost: float
-    created_at: datetime
-    items: List[LegacySaleItem] = []
-    
-    class Config:
-        from_attributes = True
-
-
-# ==================== PURCHASE SCHEMAS (Legacy) ====================
+# ==================== PURCHASE SCHEMAS ====================
 class PurchaseItemCreate(BaseModel):
     product_id: int
     quantity: float = Field(..., gt=0)
@@ -488,74 +457,33 @@ class PurchaseItem(BaseModel):
     class Config:
         from_attributes = True
 
+# Updated PurchaseCreate with labour cost fields
 class PurchaseCreate(BaseModel):
     branch_id: int
     supplier_name: Optional[str] = None
+    subtotal: float = Field(default=0, ge=0)
+    vat_amount: float = Field(default=0, ge=0)
+    shipping_cost: float = Field(default=0, ge=0)
+    labour_cost: float = Field(default=0, ge=0, description="Labour cost for this purchase")
+    labour_cost_description: Optional[str] = Field(None, description="Description of labour work")
     items: List[PurchaseItemCreate] = Field(..., min_length=1)
 
+# Updated Purchase response with labour cost fields
 class Purchase(BaseModel):
     id: int
     branch_id: int
     supplier_name: Optional[str]
+    subtotal: float = Field(default=0)
+    vat_amount: float = Field(default=0)
+    shipping_cost: float = Field(default=0)
+    labour_cost: float = Field(default=0, description="Labour cost for this purchase")
+    labour_cost_description: Optional[str] = Field(None, description="Description of labour work")
     total_amount: float
     created_at: datetime
     items: List[PurchaseItem] = []
     
     class Config:
         from_attributes = True
-
-
-# ==================== ALERT SCHEMAS ====================
-class Alert(BaseModel):
-    branch_id: int
-    product_id: int
-    message: str
-
-class AlertResponse(BaseModel):
-    id: int
-    branch_id: int
-    product_id: int
-    product_name: Optional[str] = None
-    branch_name: Optional[str] = None
-    message: str
-    created_at: datetime
-    resolved: bool
-    resolved_at: Optional[datetime]
-    
-    class Config:
-        from_attributes = True
-
-
-# ==================== AUTH SCHEMAS ====================
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-class TokenData(BaseModel):
-    email: Optional[str] = None
-    role: Optional[str] = None
-    user_id: Optional[int] = None
-    branch_id: Optional[int] = None
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-# ==================== DATE RANGE SCHEMA ====================
-class DateRange(BaseModel):
-    from_date: date
-    to_date: date
-
-
-# ==================== TICKET SUMMARY SCHEMA ====================
-class TicketSummary(BaseModel):
-    total_tickets_purchased: int = 0
-    total_tickets_used: int = 0
-    total_tickets_remaining: int = 0
-    total_revenue_from_tickets: float = 0
-    total_purchased_value: float = 0
-    ticket_utilization_rate: float = 0
 
 
 # ==================== PURCHASE ORDER SCHEMAS ====================
@@ -577,13 +505,17 @@ class PurchaseOrderItemResponse(PurchaseOrderItemBase):
     
     model_config = ConfigDict(from_attributes=True)
 
+# Updated PurchaseOrderBase - REMOVED discount_amount, ADDED labour_cost
 class PurchaseOrderBase(BaseModel):
     supplier: str
     expected_delivery_date: Optional[date] = None
     vat_rate: Optional[float] = Field(default=None, ge=0, le=100)
     tax_amount: Decimal = Field(default=0, ge=0)
     shipping_cost: Decimal = Field(default=0, ge=0)
-    discount_amount: Decimal = Field(default=0, ge=0)
+    # REMOVED: discount_amount: Decimal = Field(default=0, ge=0)
+    # ADDED: Labour cost fields
+    labour_cost: Decimal = Field(default=0, ge=0, description="Labour cost for this purchase")
+    labour_cost_description: Optional[str] = Field(None, description="Description of labour work")
     notes: Optional[str] = None
     
     bank_account_id: Optional[int] = None
@@ -603,6 +535,7 @@ class PurchaseOrderUpdate(BaseModel):
     payment_reference: Optional[str] = None
     payment_date: Optional[date] = None
 
+# Updated PurchaseOrderResponse - REMOVED discount_amount, ADDED labour_cost
 class PurchaseOrderResponse(PurchaseOrderBase):
     id: int
     order_number: str
@@ -755,10 +688,47 @@ class CombinedSalesReport(BaseModel):
     daily_breakdown: List[dict]
     top_coupon_items: List[dict] = []
     top_ticket_items: List[dict] = []
-    ticket_summary: TicketSummary
+    ticket_summary: dict
     loan_summary: Optional[LoanReport] = None
     loan_repayments: float = 0
     payment_method_breakdown: dict = {}
+
+
+# ==================== ALERT SCHEMAS ====================
+class Alert(BaseModel):
+    branch_id: int
+    product_id: int
+    message: str
+
+class AlertResponse(BaseModel):
+    id: int
+    branch_id: int
+    product_id: int
+    product_name: Optional[str] = None
+    branch_name: Optional[str] = None
+    message: str
+    created_at: datetime
+    resolved: bool
+    resolved_at: Optional[datetime]
+    
+    class Config:
+        from_attributes = True
+
+
+# ==================== AUTH SCHEMAS ====================
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
+    role: Optional[str] = None
+    user_id: Optional[int] = None
+    branch_id: Optional[int] = None
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 # ==================== TEMP ITEM SCHEMAS ====================
@@ -938,7 +908,6 @@ class UserProfileUpdate(BaseModel):
 
 
 # ==================== VAT TRACKING SCHEMAS ====================
-
 class VATStatus(str, Enum):
     PENDING = "pending"
     FILED = "filed"
@@ -1147,7 +1116,6 @@ class VATRateHistoryResponse(VATRateHistoryBase):
 
 
 # ==================== VAT REPORT SCHEMAS ====================
-
 class VATPeriodReport(BaseModel):
     period_start: date
     period_end: date
@@ -1199,7 +1167,6 @@ class VATDashboardSummary(BaseModel):
 
 
 # ==================== ENHANCED WALLET SCHEMAS ====================
-
 class WalletBase(BaseModel):
     wallet_name: str = Field(..., min_length=1, max_length=100)
     wallet_type: WalletType
@@ -1418,7 +1385,6 @@ class WalletPerformanceReport(BaseModel):
 
 
 # ==================== VAT CALCULATION HELPERS ====================
-
 def calculate_vat_amount(amount: float, vat_rate: float = 15.0) -> dict:
     vat_amount = amount * (vat_rate / 100)
     total_with_vat = amount + vat_amount

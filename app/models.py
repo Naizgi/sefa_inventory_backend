@@ -225,7 +225,7 @@ class User(Base):
         return self.is_admin()
 
 
-# ==================== BANK ACCOUNT MODEL (ENHANCED with account_category) ====================
+# ==================== BANK ACCOUNT MODEL ====================
 class BankAccount(Base):
     __tablename__ = "bank_accounts"
     
@@ -237,7 +237,7 @@ class BankAccount(Base):
     branch_name = Column(String(100), nullable=True)
     account_number = Column(String(50), nullable=False)
     account_name = Column(String(255), nullable=False)
-    account_type = Column(String(50), default="checking")  # checking, savings, business
+    account_type = Column(String(50), default="checking")
     iban = Column(String(50), nullable=True)
     swift_code = Column(String(20), nullable=True)
     
@@ -248,7 +248,7 @@ class BankAccount(Base):
     # Account settings
     is_active = Column(Boolean, default=True)
     is_primary = Column(Boolean, default=False)
-    account_category = Column(String(20), default="regular")  # NEW: "vat" or "regular"
+    account_category = Column(String(20), default="regular")
     
     # Reconciliation
     last_reconciled_at = Column(DateTime(timezone=True), nullable=True)
@@ -273,7 +273,7 @@ class BankAccount(Base):
         UniqueConstraint('branch_id', 'account_number', name='unique_branch_account'),
         Index('idx_bank_account_branch', 'branch_id'),
         Index('idx_bank_account_active', 'is_active'),
-        Index('idx_bank_account_category', 'account_category'),  # NEW index for category filtering
+        Index('idx_bank_account_category', 'account_category'),
     )
 
 
@@ -424,12 +424,19 @@ class PurchaseOrder(Base):
     expected_delivery_date = Column(DateTime(timezone=True), nullable=True)
     actual_delivery_date = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(50), default=PurchaseStatus.PENDING.value)
+    
+    # Financial fields
     subtotal = Column(DECIMAL(12, 2), default=0)
     vat_rate = Column(DECIMAL(5, 2), default=15.00)
     vat_amount = Column(DECIMAL(12, 2), default=0)
     tax_amount = Column(DECIMAL(12, 2), default=0)
     shipping_cost = Column(DECIMAL(12, 2), default=0)
-    discount_amount = Column(DECIMAL(12, 2), default=0)
+    
+    # REMOVED: discount_amount = Column(DECIMAL(12, 2), default=0)
+    # ADDED: Labour cost fields (replaces discount)
+    labour_cost = Column(DECIMAL(12, 2), default=0)
+    labour_cost_description = Column(Text, nullable=True)
+    
     total_amount = Column(DECIMAL(12, 2), default=0)
     notes = Column(Text, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -479,6 +486,16 @@ class Purchase(Base):
     id = Column(Integer, primary_key=True, index=True)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     supplier_name = Column(String(255))
+    
+    # Financial fields
+    subtotal = Column(DECIMAL(12, 2), default=0)
+    vat_amount = Column(DECIMAL(12, 2), default=0)
+    shipping_cost = Column(DECIMAL(12, 2), default=0)
+    
+    # Labour cost fields (replaces discount)
+    labour_cost = Column(DECIMAL(12, 2), default=0)
+    labour_cost_description = Column(Text, nullable=True)
+    
     total_amount = Column(DECIMAL(12, 2), nullable=False)
     purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
