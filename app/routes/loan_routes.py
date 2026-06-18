@@ -14,6 +14,10 @@ from app.schemas import (
 from app.utils.dependencies import get_current_user, require_admin
 from app.utils.permissions import require_loan_creation_privilege, require_loan_approval_privilege, require_privileged
 
+# Import wallet functions
+from app.routes.wallet import get_or_create_wallet, process_wallet_transaction
+from app.models import WalletTransactionType
+
 router = APIRouter(prefix="/api/loans", tags=["Loans"])
 
 def generate_loan_number():
@@ -21,94 +25,6 @@ def generate_loan_number():
 
 def generate_payment_number():
     return f"PMT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
-
-def generate_wallet_transaction_number():
-    return f"WT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
-
-def get_wallet_for_branch(db: Session, branch_id: int, wallet_type: str = "regular"):
-    """Get or create a wallet for a branch"""
-    wallet = db.query(Wallet).filter(
-        Wallet.branch_id == branch_id,
-        Wallet.wallet_type == wallet_type,
-        Wallet.is_active == True
-    ).first()
-    
-    if not wallet:
-        # Create default wallet if it doesn't exist
-        wallet = Wallet(
-            wallet_number=f"WAL-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
-            wallet_name=f"Default {wallet_type.capitalize()} Wallet",
-            branch_id=branch_id,
-            wallet_type=wallet_type,
-            wallet_purpose="regular_stock",
-            balance=Decimal('0'),
-            currency="ETB",
-            is_active=True,
-            created_by=1  # System user
-        )
-        db.add(wallet)
-        db.flush()
-    
-    return wallet
-
-def process_wallet_transaction(
-    db: Session,
-    wallet_id: int,
-    transaction_type: str,
-    amount: Decimal,
-    description: str,
-    user_id: int,
-    reference_type: Optional[str] = None,
-    reference_id: Optional[int] = None,
-    bank_account_id: Optional[int] = None
-):
-    """Process a wallet transaction"""
-    wallet = db.query(Wallet).filter(Wallet.id == wallet_id).first()
-    if not wallet:
-        raise HTTPException(status_code=404, detail="Wallet not found")
-    
-    # Validate amount
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
-    
-    # For withdrawals, check balance
-    if transaction_type in ['withdrawal', 'purchase', 'restock']:
-        if wallet.balance < amount:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Insufficient balance in wallet '{wallet.wallet_name}'. "
-                       f"Available: {float(wallet.balance)}, Required: {float(amount)}"
-            )
-    
-    # Calculate new balance
-    balance_before = wallet.balance
-    if transaction_type in ['deposit', 'refund']:
-        new_balance = wallet.balance + amount
-    else:  # withdrawal, purchase, restock
-        new_balance = wallet.balance - amount
-    
-    # Create transaction record
-    transaction = WalletTransaction(
-        transaction_number=generate_wallet_transaction_number(),
-        wallet_id=wallet_id,
-        transaction_type=transaction_type,
-        amount=amount,
-        balance_before=balance_before,
-        balance_after=new_balance,
-        description=description,
-        reference_type=reference_type,
-        reference_id=reference_id,
-        bank_reference=str(bank_account_id) if bank_account_id else None,
-        created_by=user_id,
-        status="completed"
-    )
-    db.add(transaction)
-    
-    # Update wallet balance
-    wallet.balance = new_balance
-    
-    db.flush()
-    return transaction
 
 # POST - Create loan (handle both with and without trailing slash)
 @router.post("", response_model=LoanResponse)
@@ -661,28 +577,22 @@ def add_loan_payment(
         if not bank_account:
             raise HTTPException(status_code=404, detail="Bank account not found or inactive")
         
-        # Get or create wallet for the branch
-        wallet = get_wallet_for_branch(db, loan.branch_id, "regular")
+        # Get or create wallet for the branch (using the wallet helper)
+        wallet = get_or_create_wallet(db, loan.branch_id, "regular")
         
-        # Add to wallet
-        wallet.balance += payment_data.amount
-        
-        # Record wallet transaction with generated transaction number
-        wallet_transaction = WalletTransaction(
-            transaction_number=generate_wallet_transaction_number(),
+        # Process wallet transaction (deposit)
+        transaction = process_wallet_transaction(
+            db=db,
             wallet_id=wallet.id,
+            transaction_type=WalletTransactionType.DEPOSIT.value,
             amount=payment_data.amount,
-            transaction_type='deposit',
             description=f"Loan payment from {loan.customer_name} - {loan.loan_number}",
-            bank_account_id=payment_data.bank_account_id,
-            created_by=current_user.id,
-            created_at=datetime.now(),
+            user_id=current_user.id,
             reference_type="loan_payment",
             reference_id=loan.id,
-            reference_number=f"LOAN-PAYMENT-{loan.loan_number}",
-            bank_reference=str(payment_data.bank_account_id) if payment_data.bank_account_id else None
+            bank_account_id=payment_data.bank_account_id
         )
-        db.add(wallet_transaction)
+        print(f"✅ Wallet deposited: {transaction.transaction_number} - Amount: {payment_data.amount} to wallet '{wallet.wallet_name}'")
     
     # Create payment record
     payment = LoanPayment(
@@ -767,28 +677,22 @@ def settle_loan(
         if not bank_account:
             raise HTTPException(status_code=404, detail="Bank account not found or inactive")
         
-        # Get or create wallet for the branch
-        wallet = get_wallet_for_branch(db, loan.branch_id, "regular")
+        # Get or create wallet for the branch (using the wallet helper)
+        wallet = get_or_create_wallet(db, loan.branch_id, "regular")
         
-        # Add to wallet
-        wallet.balance += loan.remaining_amount
-        
-        # Record wallet transaction with generated transaction number
-        wallet_transaction = WalletTransaction(
-            transaction_number=generate_wallet_transaction_number(),
+        # Process wallet transaction (deposit)
+        transaction = process_wallet_transaction(
+            db=db,
             wallet_id=wallet.id,
+            transaction_type=WalletTransactionType.DEPOSIT.value,
             amount=loan.remaining_amount,
-            transaction_type='deposit',
             description=f"Loan settlement from {loan.customer_name} - {loan.loan_number}",
-            bank_account_id=settle_data.bank_account_id,
-            created_by=current_user.id,
-            created_at=datetime.now(),
+            user_id=current_user.id,
             reference_type="loan",
             reference_id=loan.id,
-            reference_number=f"LOAN-SETTLEMENT-{loan.loan_number}",
-            bank_reference=str(settle_data.bank_account_id) if settle_data.bank_account_id else None
+            bank_account_id=settle_data.bank_account_id
         )
-        db.add(wallet_transaction)
+        print(f"✅ Wallet deposited for settlement: {transaction.transaction_number} - Amount: {loan.remaining_amount} to wallet '{wallet.wallet_name}'")
     
     # Create payment for remaining amount
     payment = LoanPayment(
