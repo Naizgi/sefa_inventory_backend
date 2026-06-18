@@ -22,6 +22,9 @@ def generate_loan_number():
 def generate_payment_number():
     return f"PMT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
+def generate_wallet_transaction_number():
+    return f"WT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
 def get_wallet_for_branch(db: Session, branch_id: int, wallet_type: str = "regular"):
     """Get or create a wallet for a branch"""
     wallet = db.query(Wallet).filter(
@@ -86,7 +89,7 @@ def process_wallet_transaction(
     
     # Create transaction record
     transaction = WalletTransaction(
-        transaction_number=f"WT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
+        transaction_number=generate_wallet_transaction_number(),
         wallet_id=wallet_id,
         transaction_type=transaction_type,
         amount=amount,
@@ -664,8 +667,9 @@ def add_loan_payment(
         # Add to wallet
         wallet.balance += payment_data.amount
         
-        # Record wallet transaction - FIXED: removed 'reference' field, using correct fields
+        # Record wallet transaction with generated transaction number
         wallet_transaction = WalletTransaction(
+            transaction_number=generate_wallet_transaction_number(),
             wallet_id=wallet.id,
             amount=payment_data.amount,
             transaction_type='deposit',
@@ -769,8 +773,9 @@ def settle_loan(
         # Add to wallet
         wallet.balance += loan.remaining_amount
         
-        # Record wallet transaction - FIXED: removed 'reference' field, using correct fields
+        # Record wallet transaction with generated transaction number
         wallet_transaction = WalletTransaction(
+            transaction_number=generate_wallet_transaction_number(),
             wallet_id=wallet.id,
             amount=loan.remaining_amount,
             transaction_type='deposit',
