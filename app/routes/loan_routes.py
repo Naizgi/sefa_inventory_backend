@@ -664,16 +664,19 @@ def add_loan_payment(
         # Add to wallet
         wallet.balance += payment_data.amount
         
-        # Record wallet transaction
+        # Record wallet transaction - FIXED: removed 'reference' field, using correct fields
         wallet_transaction = WalletTransaction(
             wallet_id=wallet.id,
             amount=payment_data.amount,
             transaction_type='deposit',
-            reference=f"LOAN-PAYMENT-{loan.loan_number}",
             description=f"Loan payment from {loan.customer_name} - {loan.loan_number}",
             bank_account_id=payment_data.bank_account_id,
             created_by=current_user.id,
-            created_at=datetime.now()
+            created_at=datetime.now(),
+            reference_type="loan_payment",
+            reference_id=loan.id,
+            reference_number=f"LOAN-PAYMENT-{loan.loan_number}",
+            bank_reference=str(payment_data.bank_account_id) if payment_data.bank_account_id else None
         )
         db.add(wallet_transaction)
     
@@ -766,16 +769,19 @@ def settle_loan(
         # Add to wallet
         wallet.balance += loan.remaining_amount
         
-        # Record wallet transaction
+        # Record wallet transaction - FIXED: removed 'reference' field, using correct fields
         wallet_transaction = WalletTransaction(
             wallet_id=wallet.id,
             amount=loan.remaining_amount,
             transaction_type='deposit',
-            reference=f"LOAN-SETTLEMENT-{loan.loan_number}",
             description=f"Loan settlement from {loan.customer_name} - {loan.loan_number}",
             bank_account_id=settle_data.bank_account_id,
             created_by=current_user.id,
-            created_at=datetime.now()
+            created_at=datetime.now(),
+            reference_type="loan",
+            reference_id=loan.id,
+            reference_number=f"LOAN-SETTLEMENT-{loan.loan_number}",
+            bank_reference=str(settle_data.bank_account_id) if settle_data.bank_account_id else None
         )
         db.add(wallet_transaction)
     
