@@ -6,7 +6,7 @@ from decimal import Decimal
 import uuid
 
 from app.database import get_db
-from app.models import User, Loan, LoanPayment, LoanItem, Product, Stock, StockMovement
+from app.models import User, Loan, LoanPayment, LoanItem, Product, Stock, StockMovement, Wallet, WalletTransaction, BankAccount
 from app.schemas import (
     LoanCreate, LoanResponse, LoanUpdate, LoanPaymentCreate,
     LoanPaymentResponse, LoanSettleRequest
@@ -22,13 +22,98 @@ def generate_loan_number():
 def generate_payment_number():
     return f"PMT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
+def get_wallet_for_branch(db: Session, branch_id: int, wallet_type: str = "regular"):
+    """Get or create a wallet for a branch"""
+    wallet = db.query(Wallet).filter(
+        Wallet.branch_id == branch_id,
+        Wallet.wallet_type == wallet_type,
+        Wallet.is_active == True
+    ).first()
+    
+    if not wallet:
+        # Create default wallet if it doesn't exist
+        wallet = Wallet(
+            wallet_number=f"WAL-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
+            wallet_name=f"Default {wallet_type.capitalize()} Wallet",
+            branch_id=branch_id,
+            wallet_type=wallet_type,
+            wallet_purpose="regular_stock",
+            balance=Decimal('0'),
+            currency="ETB",
+            is_active=True,
+            created_by=1  # System user
+        )
+        db.add(wallet)
+        db.flush()
+    
+    return wallet
+
+def process_wallet_transaction(
+    db: Session,
+    wallet_id: int,
+    transaction_type: str,
+    amount: Decimal,
+    description: str,
+    user_id: int,
+    reference_type: Optional[str] = None,
+    reference_id: Optional[int] = None,
+    bank_account_id: Optional[int] = None
+):
+    """Process a wallet transaction"""
+    wallet = db.query(Wallet).filter(Wallet.id == wallet_id).first()
+    if not wallet:
+        raise HTTPException(status_code=404, detail="Wallet not found")
+    
+    # Validate amount
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+    
+    # For withdrawals, check balance
+    if transaction_type in ['withdrawal', 'purchase', 'restock']:
+        if wallet.balance < amount:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient balance in wallet '{wallet.wallet_name}'. "
+                       f"Available: {float(wallet.balance)}, Required: {float(amount)}"
+            )
+    
+    # Calculate new balance
+    balance_before = wallet.balance
+    if transaction_type in ['deposit', 'refund']:
+        new_balance = wallet.balance + amount
+    else:  # withdrawal, purchase, restock
+        new_balance = wallet.balance - amount
+    
+    # Create transaction record
+    transaction = WalletTransaction(
+        transaction_number=f"WT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
+        wallet_id=wallet_id,
+        transaction_type=transaction_type,
+        amount=amount,
+        balance_before=balance_before,
+        balance_after=new_balance,
+        description=description,
+        reference_type=reference_type,
+        reference_id=reference_id,
+        bank_reference=str(bank_account_id) if bank_account_id else None,
+        created_by=user_id,
+        status="completed"
+    )
+    db.add(transaction)
+    
+    # Update wallet balance
+    wallet.balance = new_balance
+    
+    db.flush()
+    return transaction
+
 # POST - Create loan (handle both with and without trailing slash)
 @router.post("", response_model=LoanResponse)
 @router.post("/", response_model=LoanResponse)
 def create_loan(
     loan_data: LoanCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_loan_creation_privilege)  # Only privileged users can create loans
+    current_user: User = Depends(require_loan_creation_privilege)
 ):
     """Create a new loan - deducts stock and records stock movement (Admin & Privileged Sales only)"""
     
@@ -75,7 +160,6 @@ def create_loan(
         total_with_interest = total_amount + interest_amount
         
         # Determine if loan requires approval
-        # Loans from privileged_sales don't need approval, regular sales can't create loans anyway
         requires_approval = not current_user.is_admin()
         approval_status = "pending" if requires_approval else "approved"
         
@@ -198,7 +282,7 @@ def create_loan(
 def approve_loan(
     loan_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_loan_approval_privilege)  # Admin only
+    current_user: User = Depends(require_loan_approval_privilege)
 ):
     """Approve a loan (Admin only)"""
     
@@ -227,7 +311,7 @@ def approve_loan(
     }
 
 
-# GET - Get all loans (handle both with and without trailing slash)
+# GET - Get all loans
 @router.get("", response_model=List[LoanResponse])
 @router.get("/", response_model=List[LoanResponse])
 def get_loans(
@@ -238,16 +322,14 @@ def get_loans(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get all loans with filters (Admin sees all, Privileged sees all, Regular sees only their branch)"""
+    """Get all loans with filters"""
     
     query = db.query(Loan)
     
-    # Regular sales users only see their branch's loans
     if not current_user.is_privileged():
         if not current_user.branch_id:
             raise HTTPException(status_code=400, detail="User not assigned to a branch")
         query = query.filter(Loan.branch_id == current_user.branch_id)
-    # Admin and privileged sales see all loans
     
     if customer_name:
         query = query.filter(Loan.customer_name.ilike(f"%{customer_name}%"))
@@ -278,7 +360,6 @@ def get_loans(
                 "product_name": product.name if product else None
             })
         
-        # Get payment history for each loan
         payments_response = []
         for payment in loan.payments:
             recorder = db.query(User).filter(User.id == payment.recorded_by).first()
@@ -292,7 +373,8 @@ def get_loans(
                 "notes": payment.notes,
                 "recorded_by": recorder.name if recorder else "System",
                 "sale_id": payment.sale_id,
-                "created_at": payment.created_at
+                "created_at": payment.created_at,
+                "bank_account_id": payment.bank_account_id
             })
         
         result.append({
@@ -330,13 +412,12 @@ def get_loan(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get loan by ID (Admin sees all, Privileged sees all, Regular sees only their branch)"""
+    """Get loan by ID"""
     
     loan = db.query(Loan).filter(Loan.id == loan_id).first()
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
     
-    # Check permission for non-privileged users
     if not current_user.is_privileged():
         if not current_user.branch_id:
             raise HTTPException(status_code=400, detail="User not assigned to a branch")
@@ -363,7 +444,6 @@ def get_loan(
             "product_name": product.name if product else None
         })
     
-    # Get payment history
     payments_response = []
     for payment in loan.payments:
         recorder = db.query(User).filter(User.id == payment.recorded_by).first()
@@ -377,7 +457,8 @@ def get_loan(
             "notes": payment.notes,
             "recorded_by": recorder.name if recorder else "System",
             "sale_id": payment.sale_id,
-            "created_at": payment.created_at
+            "created_at": payment.created_at,
+            "bank_account_id": payment.bank_account_id
         })
     
     return {
@@ -412,7 +493,7 @@ def update_loan(
     loan_id: int,
     loan_update: LoanUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)  # Only admin can update loans
+    current_user: User = Depends(require_admin)
 ):
     """Update loan details (Admin only)"""
     
@@ -424,7 +505,6 @@ def update_loan(
         loan.due_date = datetime.combine(loan_update.due_date, datetime.min.time())
     if loan_update.interest_rate is not None:
         loan.interest_rate = Decimal(str(loan_update.interest_rate))
-        # Recalculate interest amount
         loan.interest_amount = (loan.total_amount - loan.interest_amount) * (loan.interest_rate / 100)
         loan.total_amount = (loan.total_amount - loan.interest_amount) + loan.interest_amount
         loan.remaining_amount = loan.total_amount - loan.paid_amount
@@ -471,7 +551,8 @@ def update_loan(
             "notes": payment.notes,
             "recorded_by": recorder.name if recorder else "System",
             "sale_id": payment.sale_id,
-            "created_at": payment.created_at
+            "created_at": payment.created_at,
+            "bank_account_id": payment.bank_account_id
         })
     
     return {
@@ -513,11 +594,9 @@ def delete_loan(
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
     
-    # Only allow deletion of loans with no payments or settled status
     if loan.paid_amount > 0 and loan.status != 'settled':
         raise HTTPException(status_code=400, detail="Cannot delete loan with existing payments")
     
-    # Restore stock for items
     for item in loan.items:
         stock = db.query(Stock).filter(
             Stock.branch_id == loan.branch_id,
@@ -526,7 +605,6 @@ def delete_loan(
         if stock:
             stock.quantity += item.quantity
         
-        # Record stock movement for restoration
         stock_movement = StockMovement(
             branch_id=loan.branch_id,
             product_id=item.product_id,
@@ -550,7 +628,7 @@ def add_loan_payment(
     loan_id: int,
     payment_data: LoanPaymentCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_privileged)  # Only privileged users can record payments
+    current_user: User = Depends(require_privileged)
 ):
     """Add a payment to a loan (Admin & Privileged Sales only)"""
     
@@ -564,6 +642,41 @@ def add_loan_payment(
     if payment_data.amount > loan.remaining_amount:
         raise HTTPException(status_code=400, detail="Payment amount exceeds remaining balance")
     
+    # Handle wallet payment - deposit to wallet first
+    if payment_data.payment_method == 'wallet':
+        # Check if bank_account_id is provided
+        if not hasattr(payment_data, 'bank_account_id') or not payment_data.bank_account_id:
+            raise HTTPException(status_code=400, detail="Bank account ID required for wallet payment")
+        
+        # Verify bank account exists and is active
+        bank_account = db.query(BankAccount).filter(
+            BankAccount.id == payment_data.bank_account_id,
+            BankAccount.branch_id == loan.branch_id,
+            BankAccount.is_active == True
+        ).first()
+        
+        if not bank_account:
+            raise HTTPException(status_code=404, detail="Bank account not found or inactive")
+        
+        # Get or create wallet for the branch
+        wallet = get_wallet_for_branch(db, loan.branch_id, "regular")
+        
+        # Add to wallet
+        wallet.balance += payment_data.amount
+        
+        # Record wallet transaction
+        wallet_transaction = WalletTransaction(
+            wallet_id=wallet.id,
+            amount=payment_data.amount,
+            transaction_type='deposit',
+            reference=f"LOAN-PAYMENT-{loan.loan_number}",
+            description=f"Loan payment from {loan.customer_name} - {loan.loan_number}",
+            bank_account_id=payment_data.bank_account_id,
+            created_by=current_user.id,
+            created_at=datetime.now()
+        )
+        db.add(wallet_transaction)
+    
     # Create payment record
     payment = LoanPayment(
         loan_id=loan_id,
@@ -573,7 +686,8 @@ def add_loan_payment(
         reference_number=payment_data.reference_number,
         notes=payment_data.notes,
         recorded_by=current_user.id,
-        sale_id=payment_data.sale_id
+        sale_id=getattr(payment_data, 'sale_id', None),
+        bank_account_id=getattr(payment_data, 'bank_account_id', None) if payment_data.payment_method == 'wallet' else None
     )
     
     db.add(payment)
@@ -605,7 +719,8 @@ def add_loan_payment(
         "notes": payment.notes,
         "recorded_by": recorder_name,
         "sale_id": payment.sale_id,
-        "created_at": payment.created_at
+        "created_at": payment.created_at,
+        "bank_account_id": payment.bank_account_id
     }
 
 
@@ -615,7 +730,7 @@ def settle_loan(
     loan_id: int,
     settle_data: LoanSettleRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_privileged)  # Only privileged users can settle loans
+    current_user: User = Depends(require_privileged)
 ):
     """Settle a loan completely (Admin & Privileged Sales only)"""
     
@@ -629,6 +744,41 @@ def settle_loan(
     if settle_data.amount < loan.remaining_amount:
         raise HTTPException(status_code=400, detail=f"Amount must be at least {loan.remaining_amount} to settle")
     
+    # Handle wallet payment - deposit to wallet first
+    if settle_data.payment_method == 'wallet':
+        # Check if bank_account_id is provided
+        if not hasattr(settle_data, 'bank_account_id') or not settle_data.bank_account_id:
+            raise HTTPException(status_code=400, detail="Bank account ID required for wallet payment")
+        
+        # Verify bank account exists and is active
+        bank_account = db.query(BankAccount).filter(
+            BankAccount.id == settle_data.bank_account_id,
+            BankAccount.branch_id == loan.branch_id,
+            BankAccount.is_active == True
+        ).first()
+        
+        if not bank_account:
+            raise HTTPException(status_code=404, detail="Bank account not found or inactive")
+        
+        # Get or create wallet for the branch
+        wallet = get_wallet_for_branch(db, loan.branch_id, "regular")
+        
+        # Add to wallet
+        wallet.balance += loan.remaining_amount
+        
+        # Record wallet transaction
+        wallet_transaction = WalletTransaction(
+            wallet_id=wallet.id,
+            amount=loan.remaining_amount,
+            transaction_type='deposit',
+            reference=f"LOAN-SETTLEMENT-{loan.loan_number}",
+            description=f"Loan settlement from {loan.customer_name} - {loan.loan_number}",
+            bank_account_id=settle_data.bank_account_id,
+            created_by=current_user.id,
+            created_at=datetime.now()
+        )
+        db.add(wallet_transaction)
+    
     # Create payment for remaining amount
     payment = LoanPayment(
         loan_id=loan_id,
@@ -637,7 +787,8 @@ def settle_loan(
         payment_method=settle_data.payment_method.value if hasattr(settle_data.payment_method, 'value') else settle_data.payment_method,
         reference_number=settle_data.reference_number,
         notes=settle_data.notes,
-        recorded_by=current_user.id
+        recorded_by=current_user.id,
+        bank_account_id=getattr(settle_data, 'bank_account_id', None) if settle_data.payment_method == 'wallet' else None
     )
     
     db.add(payment)
@@ -650,4 +801,118 @@ def settle_loan(
     
     db.commit()
     
-    return {"message": "Loan settled successfully", "payment_id": payment.id}
+    # Get bank account details for response
+    bank_account_details = None
+    if payment.bank_account_id:
+        bank_account = db.query(BankAccount).filter(BankAccount.id == payment.bank_account_id).first()
+        if bank_account:
+            bank_account_details = {
+                "id": bank_account.id,
+                "bank_name": bank_account.bank_name,
+                "account_number": bank_account.account_number,
+                "account_name": bank_account.account_name
+            }
+    
+    return {
+        "message": "Loan settled successfully", 
+        "payment_id": payment.id,
+        "payment_number": payment.payment_number,
+        "amount": float(payment.amount),
+        "payment_method": payment.payment_method,
+        "reference_number": payment.reference_number,
+        "bank_account_id": payment.bank_account_id,
+        "bank_account_details": bank_account_details
+    }
+
+
+# GET - Get loan payment history
+@router.get("/{loan_id}/payments", response_model=List[LoanPaymentResponse])
+def get_loan_payments(
+    loan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all payments for a specific loan"""
+    
+    loan = db.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    
+    if not current_user.is_privileged():
+        if not current_user.branch_id:
+            raise HTTPException(status_code=400, detail="User not assigned to a branch")
+        if loan.branch_id != current_user.branch_id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this loan")
+    
+    payments = db.query(LoanPayment).filter(LoanPayment.loan_id == loan_id).order_by(LoanPayment.payment_date.desc()).all()
+    
+    result = []
+    for payment in payments:
+        recorder = db.query(User).filter(User.id == payment.recorded_by).first()
+        result.append({
+            "id": payment.id,
+            "payment_number": payment.payment_number,
+            "payment_date": payment.payment_date,
+            "amount": float(payment.amount),
+            "payment_method": payment.payment_method,
+            "reference_number": payment.reference_number,
+            "notes": payment.notes,
+            "recorded_by": recorder.name if recorder else "System",
+            "sale_id": payment.sale_id,
+            "created_at": payment.created_at,
+            "bank_account_id": payment.bank_account_id
+        })
+    
+    return result
+
+
+# GET - Loan summary
+@router.get("/summary")
+def get_loan_summary(
+    branch_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get loan summary statistics"""
+    
+    query = db.query(Loan)
+    
+    if not current_user.is_privileged():
+        if not current_user.branch_id:
+            raise HTTPException(status_code=400, detail="User not assigned to a branch")
+        query = query.filter(Loan.branch_id == current_user.branch_id)
+    elif branch_id:
+        query = query.filter(Loan.branch_id == branch_id)
+    
+    loans = query.all()
+    
+    total_loans = len(loans)
+    total_amount = sum(float(l.total_amount) for l in loans)
+    total_paid = sum(float(l.paid_amount) for l in loans)
+    total_remaining = sum(float(l.remaining_amount) for l in loans)
+    
+    active_loans = sum(1 for l in loans if l.status in ['active', 'partially_paid'])
+    settled_loans = sum(1 for l in loans if l.status == 'settled')
+    overdue_loans = sum(1 for l in loans if l.due_date < datetime.now() and l.status != 'settled')
+    
+    # Payment method breakdown
+    payment_methods = {}
+    for loan in loans:
+        for payment in loan.payments:
+            method = payment.payment_method
+            if method not in payment_methods:
+                payment_methods[method] = 0
+            payment_methods[method] += float(payment.amount)
+    
+    return {
+        "summary": {
+            "total_loans": total_loans,
+            "total_amount": total_amount,
+            "total_paid": total_paid,
+            "total_remaining": total_remaining,
+            "active_loans": active_loans,
+            "settled_loans": settled_loans,
+            "overdue_loans": overdue_loans
+        },
+        "payment_methods": payment_methods
+    }

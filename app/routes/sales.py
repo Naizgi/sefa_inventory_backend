@@ -855,7 +855,8 @@ def create_sale(
     current_user = Depends(get_current_user)
 ):
     """Create a new sale transaction with tax, payment method, and bank account support.
-       When payment method is 'transfer', the amount is added to the wallet linked to the bank account."""
+       When payment method is 'transfer', the amount is added to the wallet linked to the bank account.
+       Now supports shipping, labour, and other costs."""
     
     print(f"=== CREATE SALE ===")
     print(f"User: {current_user.id} - {current_user.name} - Role: {current_user.role}")
@@ -987,9 +988,13 @@ def create_sale(
         if sale_data.discount_type == "percentage":
             global_discount = subtotal * (Decimal(str(sale_data.discount_amount)) / Decimal('100'))
         
-        shipping_cost = Decimal(str(sale_data.shipping_cost))
+        # Additional costs from the schema
+        shipping_cost = Decimal(str(sale_data.shipping_cost)) if sale_data.shipping_cost else Decimal('0')
+        labour_cost = Decimal(str(sale_data.labour_cost)) if sale_data.labour_cost else Decimal('0')
+        other_cost = Decimal(str(sale_data.other_cost)) if sale_data.other_cost else Decimal('0')
         
-        total_amount = subtotal + tax_amount + shipping_cost - global_discount
+        # Calculate total amount including all costs
+        total_amount = subtotal + tax_amount + shipping_cost + labour_cost + other_cost - global_discount
         
         invoice_number = generate_invoice_number(db)
         
@@ -1006,8 +1011,13 @@ def create_sale(
             discount_amount=global_discount,
             discount_type=sale_data.discount_type,
             shipping_cost=shipping_cost,
+            labour_cost=labour_cost,
+            other_cost=other_cost,
+            other_cost_description=sale_data.other_cost_description,
             total_amount=total_amount,
             total_cost=total_cost,
+            gross_profit=subtotal - total_cost,
+            profit_margin=((subtotal - total_cost) / subtotal * 100) if subtotal > 0 else Decimal('0'),
             payment_method=sale_data.payment_method,
             bank_account_id=sale_data.bank_account_id,
             transaction_reference=sale_data.transaction_reference,
@@ -1121,7 +1131,10 @@ def create_sale(
                     "item_count": len(sale_items),
                     "salesman_name": current_user.name,
                     "branch_name": branch.name,
-                    "created_at": sale.created_at.strftime("%Y-%m-%d %H:%M:%S") if sale.created_at else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "created_at": sale.created_at.strftime("%Y-%m-%d %H:%M:%S") if sale.created_at else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "shipping_cost": float(sale.shipping_cost),
+                    "labour_cost": float(sale.labour_cost),
+                    "other_cost": float(sale.other_cost)
                 }
                 
                 print(f"🔵 [SALE ROUTER] Sale data for email: {sale_data_for_email}")
@@ -1157,8 +1170,13 @@ def create_sale(
             discount_amount=float(sale.discount_amount),
             discount_type=sale.discount_type,
             shipping_cost=float(sale.shipping_cost),
+            labour_cost=float(sale.labour_cost),
+            other_cost=float(sale.other_cost),
+            other_cost_description=sale.other_cost_description,
             total_amount=float(sale.total_amount),
             total_cost=float(sale.total_cost),
+            gross_profit=float(sale.gross_profit),
+            profit_margin=float(sale.profit_margin),
             payment_method=sale.payment_method,
             bank_account_id=sale.bank_account_id,
             bank_account_details=bank_account_details,
@@ -1271,8 +1289,13 @@ def get_sales(
             discount_amount=float(sale.discount_amount),
             discount_type=sale.discount_type,
             shipping_cost=float(sale.shipping_cost),
+            labour_cost=float(sale.labour_cost),
+            other_cost=float(sale.other_cost),
+            other_cost_description=sale.other_cost_description,
             total_amount=float(sale.total_amount),
             total_cost=float(sale.total_cost),
+            gross_profit=float(sale.gross_profit),
+            profit_margin=float(sale.profit_margin),
             payment_method=sale.payment_method,
             bank_account_id=sale.bank_account_id,
             bank_account_details=bank_account_details,
@@ -1365,8 +1388,13 @@ def get_sale(
         discount_amount=float(sale.discount_amount),
         discount_type=sale.discount_type,
         shipping_cost=float(sale.shipping_cost),
+        labour_cost=float(sale.labour_cost),
+        other_cost=float(sale.other_cost),
+        other_cost_description=sale.other_cost_description,
         total_amount=float(sale.total_amount),
         total_cost=float(sale.total_cost),
+        gross_profit=float(sale.gross_profit),
+        profit_margin=float(sale.profit_margin),
         payment_method=sale.payment_method,
         bank_account_id=sale.bank_account_id,
         bank_account_details=bank_account_details,
@@ -1412,10 +1440,15 @@ def update_sale(
             detail="Not authorized to update this sale"
         )
     
-    allowed_fields = ["customer_name", "customer_phone", "customer_email", "notes"]
+    allowed_fields = ["customer_name", "customer_phone", "customer_email", "notes", 
+                     "shipping_cost", "labour_cost", "other_cost", "other_cost_description"]
     for field in allowed_fields:
         if field in sale_update:
             setattr(sale, field, sale_update[field])
+    
+    # Recalculate total amount if costs changed
+    if any(field in sale_update for field in ["shipping_cost", "labour_cost", "other_cost"]):
+        sale.total_amount = sale.subtotal + sale.tax_amount + sale.shipping_cost + sale.labour_cost + sale.other_cost - sale.discount_amount
     
     db.commit()
     db.refresh(sale)
@@ -1453,11 +1486,17 @@ def get_sales_by_payment_method(
             summary[method] = {
                 "count": 0,
                 "total_amount": 0,
-                "total_tax": 0
+                "total_tax": 0,
+                "total_shipping": 0,
+                "total_labour": 0,
+                "total_other": 0
             }
         summary[method]["count"] += 1
         summary[method]["total_amount"] += float(sale.total_amount)
         summary[method]["total_tax"] += float(sale.tax_amount)
+        summary[method]["total_shipping"] += float(sale.shipping_cost)
+        summary[method]["total_labour"] += float(sale.labour_cost)
+        summary[method]["total_other"] += float(sale.other_cost)
     
     return summary
 

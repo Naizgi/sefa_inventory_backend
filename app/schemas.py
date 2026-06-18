@@ -24,6 +24,7 @@ class LoanPaymentMethod(str, Enum):
     TICKET = "ticket"
     COUPON = "coupon"
     MIXED = "mixed"
+    WALLET = "wallet"
 
 class SaleStatus(str, Enum):
     COMPLETED = "completed"
@@ -52,7 +53,6 @@ class DiscountType(str, Enum):
     PERCENTAGE = "percentage"
     FIXED = "fixed"
 
-# Damaged Goods Status - Define ONCE here
 class DamagedGoodsStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
@@ -61,11 +61,11 @@ class DamagedGoodsStatus(str, Enum):
 
 # ==================== ENHANCED WALLET ENUMS ====================
 class WalletType(str, Enum):
-    VAT = "vat"                    # VAT-tracked wallet
-    REGULAR = "regular"            # Regular stock wallet
-    PETTY_CASH = "petty_cash"      # Petty cash wallet
-    EXPENSE = "expense"            # Expense wallet
-    CUSTOM = "custom"              # Custom wallet type
+    VAT = "vat"
+    REGULAR = "regular"
+    PETTY_CASH = "petty_cash"
+    EXPENSE = "expense"
+    CUSTOM = "custom"
 
 class WalletPurpose(str, Enum):
     VAT_OPERATIONS = "vat_operations"
@@ -77,13 +77,13 @@ class WalletPurpose(str, Enum):
     OTHER = "other"
 
 class WalletTransactionType(str, Enum):
-    DEPOSIT = "deposit"           # Money added to wallet (manual deposit)
-    WITHDRAWAL = "withdrawal"      # Money taken out (manual withdrawal)
-    PURCHASE = "purchase"          # Money spent on purchase order
-    RESTOCK = "restock"            # Money spent on restocking
-    REFUND = "refund"              # Money refunded to customer (deducted from wallet)
-    ADJUSTMENT = "adjustment"      # Manual adjustment
-    TRANSFER = "transfer"          # Transfer between wallets
+    DEPOSIT = "deposit"
+    WITHDRAWAL = "withdrawal"
+    PURCHASE = "purchase"
+    RESTOCK = "restock"
+    REFUND = "refund"
+    ADJUSTMENT = "adjustment"
+    TRANSFER = "transfer"
 
 class WalletTransactionStatus(str, Enum):
     PENDING = "pending"
@@ -327,7 +327,13 @@ class SaleCreate(BaseModel):
     tax_rate: float = Field(default=15, ge=0, le=100)
     discount_amount: float = Field(default=0, ge=0)
     discount_type: DiscountType = Field(default=DiscountType.PERCENTAGE)
-    shipping_cost: float = Field(default=0, ge=0)
+    
+    # Additional costs for sales
+    shipping_cost: float = Field(default=0, ge=0, description="Shipping cost for the sale")
+    labour_cost: float = Field(default=0, ge=0, description="Labour cost for the sale")
+    other_cost: float = Field(default=0, ge=0, description="Other miscellaneous costs")
+    other_cost_description: Optional[str] = Field(None, description="Description of other costs")
+    
     payment_method: PaymentMethod = Field(default=PaymentMethod.CASH)
     bank_account_id: Optional[int] = None
     transaction_reference: Optional[str] = Field(None, max_length=100)
@@ -338,6 +344,10 @@ class SaleUpdate(BaseModel):
     customer_phone: Optional[str] = Field(None, max_length=50)
     customer_email: Optional[EmailStr] = None
     notes: Optional[str] = None
+    shipping_cost: Optional[float] = Field(None, ge=0)
+    labour_cost: Optional[float] = Field(None, ge=0)
+    other_cost: Optional[float] = Field(None, ge=0)
+    other_cost_description: Optional[str] = None
 
 class SaleResponse(BaseModel):
     id: int
@@ -355,9 +365,14 @@ class SaleResponse(BaseModel):
     tax_rate: float
     discount_amount: float
     discount_type: DiscountType
-    shipping_cost: float
+    
+    # Additional costs
+    shipping_cost: float = 0
+    labour_cost: float = 0
+    other_cost: float = 0
+    other_cost_description: Optional[str] = None
+    
     total_amount: float
-    total_cost: float
     
     payment_method: PaymentMethod
     bank_account_id: Optional[int]
@@ -457,27 +472,35 @@ class PurchaseItem(BaseModel):
     class Config:
         from_attributes = True
 
-# Updated PurchaseCreate with labour cost fields
 class PurchaseCreate(BaseModel):
     branch_id: int
     supplier_name: Optional[str] = None
     subtotal: float = Field(default=0, ge=0)
     vat_amount: float = Field(default=0, ge=0)
-    shipping_cost: float = Field(default=0, ge=0)
-    labour_cost: float = Field(default=0, ge=0, description="Labour cost for this purchase")
+    
+    # Additional costs for purchases
+    shipping_cost: float = Field(default=0, ge=0, description="Shipping cost for the purchase")
+    labour_cost: float = Field(default=0, ge=0, description="Labour cost for the purchase")
     labour_cost_description: Optional[str] = Field(None, description="Description of labour work")
+    other_cost: float = Field(default=0, ge=0, description="Other miscellaneous costs")
+    other_cost_description: Optional[str] = Field(None, description="Description of other costs")
+    
     items: List[PurchaseItemCreate] = Field(..., min_length=1)
 
-# Updated Purchase response with labour cost fields
 class Purchase(BaseModel):
     id: int
     branch_id: int
     supplier_name: Optional[str]
     subtotal: float = Field(default=0)
     vat_amount: float = Field(default=0)
+    
+    # Additional costs
     shipping_cost: float = Field(default=0)
-    labour_cost: float = Field(default=0, description="Labour cost for this purchase")
-    labour_cost_description: Optional[str] = Field(None, description="Description of labour work")
+    labour_cost: float = Field(default=0)
+    labour_cost_description: Optional[str] = None
+    other_cost: float = Field(default=0)
+    other_cost_description: Optional[str] = None
+    
     total_amount: float
     created_at: datetime
     items: List[PurchaseItem] = []
@@ -505,17 +528,19 @@ class PurchaseOrderItemResponse(PurchaseOrderItemBase):
     
     model_config = ConfigDict(from_attributes=True)
 
-# Updated PurchaseOrderBase - REMOVED discount_amount, ADDED labour_cost
 class PurchaseOrderBase(BaseModel):
     supplier: str
     expected_delivery_date: Optional[date] = None
     vat_rate: Optional[float] = Field(default=None, ge=0, le=100)
     tax_amount: Decimal = Field(default=0, ge=0)
-    shipping_cost: Decimal = Field(default=0, ge=0)
-    # REMOVED: discount_amount: Decimal = Field(default=0, ge=0)
-    # ADDED: Labour cost fields
-    labour_cost: Decimal = Field(default=0, ge=0, description="Labour cost for this purchase")
+    
+    # Additional costs for purchase orders
+    shipping_cost: Decimal = Field(default=0, ge=0, description="Shipping cost")
+    labour_cost: Decimal = Field(default=0, ge=0, description="Labour cost")
     labour_cost_description: Optional[str] = Field(None, description="Description of labour work")
+    other_cost: Decimal = Field(default=0, ge=0, description="Other miscellaneous costs")
+    other_cost_description: Optional[str] = Field(None, description="Description of other costs")
+    
     notes: Optional[str] = None
     
     bank_account_id: Optional[int] = None
@@ -534,8 +559,14 @@ class PurchaseOrderUpdate(BaseModel):
     bank_account_id: Optional[int] = None
     payment_reference: Optional[str] = None
     payment_date: Optional[date] = None
+    
+    # Allow updating costs
+    shipping_cost: Optional[Decimal] = Field(None, ge=0)
+    labour_cost: Optional[Decimal] = Field(None, ge=0)
+    labour_cost_description: Optional[str] = None
+    other_cost: Optional[Decimal] = Field(None, ge=0)
+    other_cost_description: Optional[str] = None
 
-# Updated PurchaseOrderResponse - REMOVED discount_amount, ADDED labour_cost
 class PurchaseOrderResponse(PurchaseOrderBase):
     id: int
     order_number: str
@@ -612,6 +643,7 @@ class LoanPaymentBase(BaseModel):
     payment_method: LoanPaymentMethod
     reference_number: Optional[str] = None
     notes: Optional[str] = None
+    bank_account_id: Optional[int] = None
 
 class LoanPaymentCreate(LoanPaymentBase):
     sale_id: Optional[int] = None
@@ -651,6 +683,7 @@ class LoanSettleRequest(BaseModel):
     payment_method: LoanPaymentMethod
     reference_number: Optional[str] = None
     notes: Optional[str] = None
+    bank_account_id: Optional[int] = None
 
 class LoanSummaryResponse(BaseModel):
     summary_date: date

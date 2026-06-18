@@ -45,11 +45,11 @@ def calculate_purchase_totals(
     vat_rate: Optional[Decimal] = None, 
     tax_amount: Decimal = Decimal('0'),
     shipping_cost: Decimal = Decimal('0'), 
-    labour_cost: Decimal = Decimal('0')
+    labour_cost: Decimal = Decimal('0'),
+    other_cost: Decimal = Decimal('0')
 ) -> dict:
     """
-    Calculate purchase order totals including VAT and labour cost.
-    REMOVED discount_amount parameter - replaced with labour_cost.
+    Calculate purchase order totals including VAT, shipping, labour, and other costs.
     """
     vat_amount = Decimal('0')
     actual_vat_rate = Decimal('0')
@@ -64,8 +64,8 @@ def calculate_purchase_totals(
         if subtotal > 0:
             actual_vat_rate = (tax_amount / subtotal) * Decimal('100')
     
-    # Total = subtotal + VAT + shipping + labour_cost (NO discount)
-    total_amount = subtotal + vat_amount + shipping_cost + labour_cost
+    # Total = subtotal + VAT + shipping + labour + other
+    total_amount = subtotal + vat_amount + shipping_cost + labour_cost + other_cost
     
     return {
         'subtotal': subtotal,
@@ -95,9 +95,12 @@ def create_purchase(
     # Get VAT status from request (default to False if not specified)
     has_vat = getattr(purchase_data, 'with_vat', False)
     
-    # Get labour cost
+    # Get additional costs
+    shipping_cost = Decimal(str(purchase_data.shipping_cost)) if hasattr(purchase_data, 'shipping_cost') else Decimal('0')
     labour_cost = Decimal(str(purchase_data.labour_cost)) if hasattr(purchase_data, 'labour_cost') else Decimal('0')
     labour_cost_description = getattr(purchase_data, 'labour_cost_description', None)
+    other_cost = Decimal(str(purchase_data.other_cost)) if hasattr(purchase_data, 'other_cost') else Decimal('0')
+    other_cost_description = getattr(purchase_data, 'other_cost_description', None)
     
     # Create purchase
     purchase = PurchaseModel(
@@ -105,9 +108,11 @@ def create_purchase(
         supplier_name=purchase_data.supplier_name,
         subtotal=0,
         vat_amount=0,
-        shipping_cost=Decimal(str(purchase_data.shipping_cost)) if hasattr(purchase_data, 'shipping_cost') else Decimal('0'),
+        shipping_cost=shipping_cost,
         labour_cost=labour_cost,
         labour_cost_description=labour_cost_description,
+        other_cost=other_cost,
+        other_cost_description=other_cost_description,
         total_amount=0,
     )
     db.add(purchase)
@@ -179,7 +184,7 @@ def create_purchase(
     
     # Update purchase with calculated values
     purchase.subtotal = subtotal
-    purchase.total_amount = subtotal + vat_amount + purchase.shipping_cost + purchase.labour_cost
+    purchase.total_amount = subtotal + vat_amount + shipping_cost + labour_cost + other_cost
     
     db.commit()
     db.refresh(purchase)
@@ -242,7 +247,7 @@ def create_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Create a new purchase order with VAT, labour cost, and wallet payment"""
+    """Create a new purchase order with VAT, shipping, labour, other costs, and wallet payment"""
     
     if not current_user.branch_id:
         raise HTTPException(status_code=400, detail="User not assigned to a branch")
@@ -266,15 +271,15 @@ def create_purchase_order(
     elif hasattr(purchase_data, 'tax_amount') and purchase_data.tax_amount > 0:
         tax_amount = Decimal(str(purchase_data.tax_amount))
     
-    # Get shipping and labour cost
-    shipping = Decimal(str(purchase_data.shipping_cost)) if hasattr(purchase_data, 'shipping_cost') else Decimal('0')
-    
-    # Calculate labour cost
+    # Get all costs
+    shipping_cost = Decimal(str(purchase_data.shipping_cost)) if hasattr(purchase_data, 'shipping_cost') else Decimal('0')
     labour_cost = Decimal(str(purchase_data.labour_cost)) if hasattr(purchase_data, 'labour_cost') else Decimal('0')
     labour_cost_description = getattr(purchase_data, 'labour_cost_description', None)
+    other_cost = Decimal(str(purchase_data.other_cost)) if hasattr(purchase_data, 'other_cost') else Decimal('0')
+    other_cost_description = getattr(purchase_data, 'other_cost_description', None)
     
-    # Calculate totals with VAT (NO discount)
-    totals = calculate_purchase_totals(subtotal, vat_rate, tax_amount, shipping, labour_cost)
+    # Calculate totals with VAT and all costs
+    totals = calculate_purchase_totals(subtotal, vat_rate, tax_amount, shipping_cost, labour_cost, other_cost)
     
     # Check if using wallet payment
     use_wallet_payment = getattr(purchase_data, 'use_wallet_payment', False)
@@ -314,7 +319,7 @@ def create_purchase_order(
         bank_account_name = bank_account.account_name
         bank_name = bank_account.bank_name
     
-    # Create purchase order with VAT, labour cost, and payment fields
+    # Create purchase order with all costs and payment fields
     purchase_order = PurchaseOrder(
         order_number=generate_order_number(),
         branch_id=current_user.branch_id,
@@ -324,10 +329,11 @@ def create_purchase_order(
         vat_rate=totals['vat_rate'],
         vat_amount=totals['vat_amount'],
         tax_amount=totals['vat_amount'],
-        shipping_cost=shipping,
-        # Labour cost fields (replaces discount)
+        shipping_cost=shipping_cost,
         labour_cost=labour_cost,
         labour_cost_description=labour_cost_description,
+        other_cost=other_cost,
+        other_cost_description=other_cost_description,
         total_amount=totals['total_amount'],
         notes=purchase_data.notes,
         created_by=current_user.id,
@@ -424,9 +430,10 @@ def create_purchase_order(
         "vat_amount": float(purchase_order.vat_amount) if purchase_order.vat_amount else 0,
         "tax_amount": float(purchase_order.tax_amount),
         "shipping_cost": float(purchase_order.shipping_cost),
-        # REMOVED: "discount_amount": float(purchase_order.discount_amount),
         "labour_cost": float(purchase_order.labour_cost),
         "labour_cost_description": purchase_order.labour_cost_description,
+        "other_cost": float(purchase_order.other_cost),
+        "other_cost_description": purchase_order.other_cost_description,
         "total_amount": float(purchase_order.total_amount),
         "notes": purchase_order.notes,
         "created_by": creator_name,
@@ -455,7 +462,7 @@ def get_purchase_orders(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get all purchase orders with VAT, labour cost, and payment information"""
+    """Get all purchase orders with VAT, costs, and payment information"""
     
     try:
         query = db.query(PurchaseOrder)
@@ -524,9 +531,10 @@ def get_purchase_orders(
                 "vat_amount": float(order.vat_amount) if order.vat_amount else 0,
                 "tax_amount": float(order.tax_amount),
                 "shipping_cost": float(order.shipping_cost),
-                # REMOVED: "discount_amount": float(order.discount_amount),
                 "labour_cost": float(order.labour_cost),
                 "labour_cost_description": order.labour_cost_description,
+                "other_cost": float(order.other_cost),
+                "other_cost_description": order.other_cost_description,
                 "total_amount": float(order.total_amount),
                 "notes": order.notes,
                 "created_by": creator_name,
@@ -558,7 +566,7 @@ def get_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get purchase order by ID with VAT, labour cost, and payment information"""
+    """Get purchase order by ID with VAT, costs, and payment information"""
     order = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -612,9 +620,10 @@ def get_purchase_order(
         "vat_amount": float(order.vat_amount) if order.vat_amount else 0,
         "tax_amount": float(order.tax_amount),
         "shipping_cost": float(order.shipping_cost),
-        # REMOVED: "discount_amount": float(order.discount_amount),
         "labour_cost": float(order.labour_cost),
         "labour_cost_description": order.labour_cost_description,
+        "other_cost": float(order.other_cost),
+        "other_cost_description": order.other_cost_description,
         "total_amount": float(order.total_amount),
         "notes": order.notes,
         "created_by": creator_name,
@@ -774,7 +783,7 @@ def update_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Update purchase order status"""
+    """Update purchase order status and costs"""
     
     purchase_order = db.query(PurchaseOrder).filter(PurchaseOrder.id == order_id).first()
     if not purchase_order:
@@ -786,6 +795,18 @@ def update_purchase_order(
         purchase_order.actual_delivery_date = datetime.combine(update_data.actual_delivery_date, datetime.min.time())
     if update_data.notes:
         purchase_order.notes = update_data.notes
+    
+    # Update costs if provided
+    if update_data.shipping_cost is not None:
+        purchase_order.shipping_cost = Decimal(str(update_data.shipping_cost))
+    if update_data.labour_cost is not None:
+        purchase_order.labour_cost = Decimal(str(update_data.labour_cost))
+    if update_data.labour_cost_description is not None:
+        purchase_order.labour_cost_description = update_data.labour_cost_description
+    if update_data.other_cost is not None:
+        purchase_order.other_cost = Decimal(str(update_data.other_cost))
+    if update_data.other_cost_description is not None:
+        purchase_order.other_cost_description = update_data.other_cost_description
     
     if update_data.bank_account_id is not None:
         purchase_order.bank_account_id = update_data.bank_account_id
@@ -847,9 +868,10 @@ def update_purchase_order(
         "vat_amount": float(purchase_order.vat_amount) if purchase_order.vat_amount else 0,
         "tax_amount": float(purchase_order.tax_amount),
         "shipping_cost": float(purchase_order.shipping_cost),
-        # REMOVED: "discount_amount": float(purchase_order.discount_amount),
         "labour_cost": float(purchase_order.labour_cost),
         "labour_cost_description": purchase_order.labour_cost_description,
+        "other_cost": float(purchase_order.other_cost),
+        "other_cost_description": purchase_order.other_cost_description,
         "total_amount": float(purchase_order.total_amount),
         "notes": purchase_order.notes,
         "created_by": creator_name,
@@ -897,7 +919,7 @@ def get_purchase_report(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Get purchase report with VAT, labour cost, and payment information"""
+    """Get purchase report with VAT, shipping, labour, other costs, and payment information"""
     
     if not to_date:
         to_date = date.today()
@@ -917,7 +939,9 @@ def get_purchase_report(
     
     total_purchase_cost = sum(po.total_amount for po in purchase_orders)
     total_vat_amount = sum(po.vat_amount for po in purchase_orders if po.vat_amount)
+    total_shipping_cost = sum(po.shipping_cost for po in purchase_orders)
     total_labour_cost = sum(po.labour_cost for po in purchase_orders)
+    total_other_cost = sum(po.other_cost for po in purchase_orders)
     total_legacy_cost = sum(p.total_amount for p in purchases)
     
     # Payment method summary
@@ -977,12 +1001,16 @@ def get_purchase_report(
             "total_purchase_orders": len(purchase_orders),
             "total_purchase_cost": float(total_purchase_cost),
             "total_vat_amount": float(total_vat_amount),
+            "total_shipping_cost": float(total_shipping_cost),
             "total_labour_cost": float(total_labour_cost),
+            "total_other_cost": float(total_other_cost),
             "total_legacy_purchases": len(purchases),
             "total_legacy_cost": float(total_legacy_cost),
             "total_all_purchases": float(total_purchase_cost + total_legacy_cost),
             "average_order_value": float(total_purchase_cost / len(purchase_orders)) if purchase_orders else 0,
-            "average_labour_cost": float(total_labour_cost / len(purchase_orders)) if purchase_orders else 0
+            "average_shipping_cost": float(total_shipping_cost / len(purchase_orders)) if purchase_orders else 0,
+            "average_labour_cost": float(total_labour_cost / len(purchase_orders)) if purchase_orders else 0,
+            "average_other_cost": float(total_other_cost / len(purchase_orders)) if purchase_orders else 0
         },
         "payment_summary": {
             "wallet_payments": float(wallet_payment_total),
@@ -1024,7 +1052,9 @@ def get_purchase_report(
                 "total_amount": float(po.total_amount),
                 "vat_amount": float(po.vat_amount) if po.vat_amount else 0,
                 "vat_rate": float(po.vat_rate) if po.vat_rate else 0,
+                "shipping_cost": float(po.shipping_cost),
                 "labour_cost": float(po.labour_cost),
+                "other_cost": float(po.other_cost),
                 "status": po.status,
                 "items_count": len(po.items),
                 "payment_method": "Wallet" if po.use_wallet_payment else ("Bank" if po.bank_account_id else "Cash"),

@@ -29,6 +29,7 @@ class LoanPaymentMethod(str, enum.Enum):
     TICKET = "ticket"
     COUPON = "coupon"
     MIXED = "mixed"
+    WALLET = "wallet"  # Added wallet as payment method
 
 class SaleStatus(str, enum.Enum):
     COMPLETED = "completed"
@@ -314,9 +315,17 @@ class Sale(Base):
     tax_rate = Column(DECIMAL(5, 2), default=15)
     discount_amount = Column(DECIMAL(12, 2), default=0)
     discount_type = Column(String(20), default="percentage")
-    shipping_cost = Column(DECIMAL(12, 2), default=0)
+    
+    # Additional costs for sales
+    shipping_cost = Column(DECIMAL(12, 2), default=0, description="Shipping cost for the sale")
+    labour_cost = Column(DECIMAL(12, 2), default=0, description="Labour cost for the sale")
+    other_cost = Column(DECIMAL(12, 2), default=0, description="Other miscellaneous costs")
+    other_cost_description = Column(Text, nullable=True, description="Description of other costs")
+    
     total_amount = Column(DECIMAL(12, 2), nullable=False)
-    total_cost = Column(DECIMAL(12, 2), nullable=False)
+    total_cost = Column(DECIMAL(12, 2), nullable=False, default=0)
+    gross_profit = Column(DECIMAL(12, 2), default=0)
+    profit_margin = Column(DECIMAL(5, 2), default=0)
     
     payment_method = Column(String(50), nullable=False, default=PaymentMethod.CASH.value)
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
@@ -430,12 +439,13 @@ class PurchaseOrder(Base):
     vat_rate = Column(DECIMAL(5, 2), default=15.00)
     vat_amount = Column(DECIMAL(12, 2), default=0)
     tax_amount = Column(DECIMAL(12, 2), default=0)
-    shipping_cost = Column(DECIMAL(12, 2), default=0)
     
-    # REMOVED: discount_amount = Column(DECIMAL(12, 2), default=0)
-    # ADDED: Labour cost fields (replaces discount)
-    labour_cost = Column(DECIMAL(12, 2), default=0)
-    labour_cost_description = Column(Text, nullable=True)
+    # Additional costs for purchase orders
+    shipping_cost = Column(DECIMAL(12, 2), default=0, description="Shipping cost")
+    labour_cost = Column(DECIMAL(12, 2), default=0, description="Labour cost")
+    labour_cost_description = Column(Text, nullable=True, description="Description of labour work")
+    other_cost = Column(DECIMAL(12, 2), default=0, description="Other miscellaneous costs")
+    other_cost_description = Column(Text, nullable=True, description="Description of other costs")
     
     total_amount = Column(DECIMAL(12, 2), default=0)
     notes = Column(Text, nullable=True)
@@ -490,11 +500,13 @@ class Purchase(Base):
     # Financial fields
     subtotal = Column(DECIMAL(12, 2), default=0)
     vat_amount = Column(DECIMAL(12, 2), default=0)
-    shipping_cost = Column(DECIMAL(12, 2), default=0)
     
-    # Labour cost fields (replaces discount)
-    labour_cost = Column(DECIMAL(12, 2), default=0)
-    labour_cost_description = Column(Text, nullable=True)
+    # Additional costs for purchases
+    shipping_cost = Column(DECIMAL(12, 2), default=0, description="Shipping cost for the purchase")
+    labour_cost = Column(DECIMAL(12, 2), default=0, description="Labour cost for the purchase")
+    labour_cost_description = Column(Text, nullable=True, description="Description of labour work")
+    other_cost = Column(DECIMAL(12, 2), default=0, description="Other miscellaneous costs")
+    other_cost_description = Column(Text, nullable=True, description="Description of other costs")
     
     total_amount = Column(DECIMAL(12, 2), nullable=False)
     purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
@@ -587,11 +599,13 @@ class LoanPayment(Base):
     recorded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
     
     # Relationships
     loan = relationship("Loan", back_populates="payments")
     recorder = relationship("User", back_populates="loan_payments")
     sale = relationship("Sale", back_populates="loan_payments")
+    bank_account = relationship("BankAccount")
 
 
 class LoanSummary(Base):
