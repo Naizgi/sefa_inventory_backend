@@ -26,7 +26,7 @@ def generate_loan_number():
 def generate_payment_number():
     return f"PMT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
-# POST - Create loan (handle both with and without trailing slash)
+# POST - Create loan
 @router.post("", response_model=LoanResponse)
 @router.post("/", response_model=LoanResponse)
 def create_loan(
@@ -34,7 +34,7 @@ def create_loan(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_loan_creation_privilege)
 ):
-    """Create a new loan - deducts stock and records stock movement (Admin & Privileged Sales only)"""
+    """Create a new loan - deducts stock and records stock movement"""
     
     branch_id = current_user.branch_id
     
@@ -577,7 +577,7 @@ def add_loan_payment(
         if not bank_account:
             raise HTTPException(status_code=404, detail="Bank account not found or inactive")
         
-        # Get or create wallet for the branch (using the wallet helper)
+        # Get or create wallet for the branch
         wallet = get_or_create_wallet(db, loan.branch_id, "regular")
         
         # Process wallet transaction (deposit)
@@ -677,7 +677,7 @@ def settle_loan(
         if not bank_account:
             raise HTTPException(status_code=404, detail="Bank account not found or inactive")
         
-        # Get or create wallet for the branch (using the wallet helper)
+        # Get or create wallet for the branch
         wallet = get_or_create_wallet(db, loan.branch_id, "regular")
         
         # Process wallet transaction (deposit)
