@@ -29,7 +29,7 @@ class LoanPaymentMethod(str, enum.Enum):
     TICKET = "ticket"
     COUPON = "coupon"
     MIXED = "mixed"
-    WALLET = "wallet"  # Added wallet as payment method
+    WALLET = "wallet"
 
 class SaleStatus(str, enum.Enum):
     COMPLETED = "completed"
@@ -60,13 +60,13 @@ class DiscountType(str, enum.Enum):
 
 # ==================== WALLET ENUMS ====================
 class WalletTransactionType(str, enum.Enum):
-    DEPOSIT = "deposit"           # Money added to wallet (manual deposit)
-    WITHDRAWAL = "withdrawal"      # Money taken out (manual withdrawal)
-    PURCHASE = "purchase"          # Money spent on purchase order
-    RESTOCK = "restock"            # Money spent on restocking
-    REFUND = "refund"              # Money refunded to customer (deducted from wallet)
-    ADJUSTMENT = "adjustment"      # Manual adjustment
-    TRANSFER = "transfer"          # Transfer between wallets
+    DEPOSIT = "deposit"
+    WITHDRAWAL = "withdrawal"
+    PURCHASE = "purchase"
+    RESTOCK = "restock"
+    REFUND = "refund"
+    ADJUSTMENT = "adjustment"
+    TRANSFER = "transfer"
 
 class WalletTransactionStatus(str, enum.Enum):
     PENDING = "pending"
@@ -75,11 +75,11 @@ class WalletTransactionStatus(str, enum.Enum):
     FAILED = "failed"
 
 class WalletType(str, enum.Enum):
-    VAT = "vat"                    # VAT-tracked wallet
-    REGULAR = "regular"            # Regular stock wallet
-    PETTY_CASH = "petty_cash"      # Petty cash wallet
-    EXPENSE = "expense"            # Expense wallet
-    CUSTOM = "custom"              # Custom wallet type
+    VAT = "vat"
+    REGULAR = "regular"
+    PETTY_CASH = "petty_cash"
+    EXPENSE = "expense"
+    CUSTOM = "custom"
 
 class WalletPurpose(str, enum.Enum):
     VAT_OPERATIONS = "vat_operations"
@@ -122,7 +122,6 @@ class Branch(Base):
     vat_purchases = relationship("VATPurchase", back_populates="branch", cascade="all, delete-orphan")
     vat_sales = relationship("VATSale", back_populates="branch", cascade="all, delete-orphan")
     vat_summaries = relationship("VATSummary", back_populates="branch", cascade="all, delete-orphan")
-    # Wallet relationships
     wallets = relationship("Wallet", back_populates="branch", cascade="all, delete-orphan")
     wallet_summaries = relationship("WalletSummary", back_populates="branch", cascade="all, delete-orphan")
 
@@ -180,24 +179,20 @@ class User(Base):
     loans_approved = relationship("Loan", foreign_keys="Loan.approved_by", back_populates="approver")
     loan_payments = relationship("LoanPayment", back_populates="recorder")
     
-    # Damaged goods relationships
     damaged_goods_reported = relationship("DamagedGoods", foreign_keys="DamagedGoods.reported_by", back_populates="reporter")
     damaged_goods_approved = relationship("DamagedGoods", foreign_keys="DamagedGoods.approved_by", back_populates="approver")
     damaged_goods_processed = relationship("DamagedGoods", foreign_keys="DamagedGoods.processed_by", back_populates="processor")
     
-    # VAT relationships
     vat_purchases_created = relationship("VATPurchase", foreign_keys="VATPurchase.created_by", back_populates="creator")
     vat_sales_created = relationship("VATSale", foreign_keys="VATSale.created_by", back_populates="creator")
     vat_summaries_created = relationship("VATSummary", foreign_keys="VATSummary.created_by", back_populates="creator")
     vat_rates_created = relationship("VATRateHistory", foreign_keys="VATRateHistory.created_by", back_populates="creator")
     
-    # Wallet relationships
     wallet_transactions_created = relationship("WalletTransaction", foreign_keys="WalletTransaction.created_by", back_populates="creator")
     wallets_created = relationship("Wallet", foreign_keys="Wallet.created_by", back_populates="creator")
     bank_accounts_created = relationship("BankAccount", foreign_keys="BankAccount.created_by", back_populates="creator")
     bank_transactions_reconciled = relationship("BankTransaction", foreign_keys="BankTransaction.reconciled_by", back_populates="reconciler")
     
-    # Helper methods
     def is_admin(self) -> bool:
         return self.role == UserRole.ADMIN.value
     
@@ -233,7 +228,6 @@ class BankAccount(Base):
     id = Column(Integer, primary_key=True, index=True)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     
-    # Bank details
     bank_name = Column(String(100), nullable=False)
     branch_name = Column(String(100), nullable=True)
     account_number = Column(String(50), nullable=False)
@@ -242,26 +236,21 @@ class BankAccount(Base):
     iban = Column(String(50), nullable=True)
     swift_code = Column(String(20), nullable=True)
     
-    # Financial details
     currency = Column(String(3), default="ETB")
     current_balance = Column(DECIMAL(15, 2), default=0)
     
-    # Account settings
     is_active = Column(Boolean, default=True)
     is_primary = Column(Boolean, default=False)
     account_category = Column(String(20), default="regular")
     
-    # Reconciliation
     last_reconciled_at = Column(DateTime(timezone=True), nullable=True)
     last_reconciled_balance = Column(DECIMAL(15, 2), nullable=True)
     
-    # Metadata
     notes = Column(Text, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Relationships
     branch = relationship("Branch", back_populates="bank_accounts")
     wallets = relationship("Wallet", back_populates="bank_account")
     bank_transactions = relationship("BankTransaction", back_populates="bank_account", cascade="all, delete-orphan")
@@ -293,7 +282,6 @@ class Stock(Base):
     quantity_without_vat = Column(DECIMAL(12, 2), default=0)
     reorder_level = Column(DECIMAL(12, 2), default=0)
     
-    # Relationships
     branch = relationship("Branch", back_populates="stock")
     product = relationship("Product", back_populates="stock")
 
@@ -316,11 +304,11 @@ class Sale(Base):
     discount_amount = Column(DECIMAL(12, 2), default=0)
     discount_type = Column(String(20), default="percentage")
     
-    # Additional costs for sales
-    shipping_cost = Column(DECIMAL(12, 2), default=0, description="Shipping cost for the sale")
-    labour_cost = Column(DECIMAL(12, 2), default=0, description="Labour cost for the sale")
-    other_cost = Column(DECIMAL(12, 2), default=0, description="Other miscellaneous costs")
-    other_cost_description = Column(Text, nullable=True, description="Description of other costs")
+    # Additional costs - NO description parameter
+    shipping_cost = Column(DECIMAL(12, 2), default=0)
+    labour_cost = Column(DECIMAL(12, 2), default=0)
+    other_cost = Column(DECIMAL(12, 2), default=0)
+    other_cost_description = Column(Text, nullable=True)
     
     total_amount = Column(DECIMAL(12, 2), nullable=False)
     total_cost = Column(DECIMAL(12, 2), nullable=False, default=0)
@@ -330,6 +318,7 @@ class Sale(Base):
     payment_method = Column(String(50), nullable=False, default=PaymentMethod.CASH.value)
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
     transaction_reference = Column(String(100), nullable=True)
+    wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
     
     status = Column(String(50), default=SaleStatus.COMPLETED.value)
     refund_amount = Column(DECIMAL(12, 2), default=0)
@@ -339,7 +328,6 @@ class Sale(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Relationships
     branch = relationship("Branch", back_populates="sales")
     user = relationship("User", back_populates="sales")
     bank_account = relationship("BankAccount", back_populates="sales")
@@ -347,6 +335,7 @@ class Sale(Base):
     refunds = relationship("Refund", back_populates="original_sale", cascade="all, delete-orphan")
     loan_payments = relationship("LoanPayment", back_populates="sale")
     vat_sales = relationship("VATSale", back_populates="sale", cascade="all, delete-orphan")
+    wallet_transaction = relationship("WalletTransaction", foreign_keys=[wallet_transaction_id])
 
 
 class SaleItem(Base):
@@ -360,7 +349,6 @@ class SaleItem(Base):
     discount_amount = Column(DECIMAL(12, 2), default=0)
     line_total = Column(DECIMAL(12, 2), nullable=False)
     
-    # Relationships
     sale = relationship("Sale", back_populates="items")
     product = relationship("Product", back_populates="sale_items")
     loan_items = relationship("LoanItem", back_populates="sale_item")
@@ -394,7 +382,6 @@ class Refund(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     notes = Column(Text, nullable=True)
     
-    # Relationships
     original_sale = relationship("Sale", back_populates="refunds")
     branch = relationship("Branch")
     user = relationship("User", foreign_keys=[user_id], back_populates="refunds")
@@ -415,7 +402,6 @@ class RefundItem(Base):
     refund_amount = Column(DECIMAL(12, 2), nullable=False)
     reason = Column(Text, nullable=True)
     
-    # Relationships
     refund = relationship("Refund", back_populates="items")
     sale_item = relationship("SaleItem", back_populates="refund_items")
     product = relationship("Product", back_populates="refund_items")
@@ -434,18 +420,17 @@ class PurchaseOrder(Base):
     actual_delivery_date = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(50), default=PurchaseStatus.PENDING.value)
     
-    # Financial fields
     subtotal = Column(DECIMAL(12, 2), default=0)
     vat_rate = Column(DECIMAL(5, 2), default=15.00)
     vat_amount = Column(DECIMAL(12, 2), default=0)
     tax_amount = Column(DECIMAL(12, 2), default=0)
     
-    # Additional costs for purchase orders
-    shipping_cost = Column(DECIMAL(12, 2), default=0, description="Shipping cost")
-    labour_cost = Column(DECIMAL(12, 2), default=0, description="Labour cost")
-    labour_cost_description = Column(Text, nullable=True, description="Description of labour work")
-    other_cost = Column(DECIMAL(12, 2), default=0, description="Other miscellaneous costs")
-    other_cost_description = Column(Text, nullable=True, description="Description of other costs")
+    # Additional costs - NO description parameter
+    shipping_cost = Column(DECIMAL(12, 2), default=0)
+    labour_cost = Column(DECIMAL(12, 2), default=0)
+    labour_cost_description = Column(Text, nullable=True)
+    other_cost = Column(DECIMAL(12, 2), default=0)
+    other_cost_description = Column(Text, nullable=True)
     
     total_amount = Column(DECIMAL(12, 2), default=0)
     notes = Column(Text, nullable=True)
@@ -457,12 +442,10 @@ class PurchaseOrder(Base):
     payment_reference = Column(String(100), nullable=True)
     payment_date = Column(DateTime(timezone=True), nullable=True)
     
-    # Wallet payment fields
     use_wallet_payment = Column(Boolean, default=False)
     wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True)
     wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
     
-    # Relationships
     branch = relationship("Branch", back_populates="purchase_orders")
     items = relationship("PurchaseOrderItem", back_populates="purchase_order", cascade="all, delete-orphan")
     creator = relationship("User", foreign_keys=[created_by], back_populates="purchase_orders")
@@ -485,7 +468,6 @@ class PurchaseOrderItem(Base):
     received_at = Column(DateTime(timezone=True), nullable=True)
     notes = Column(Text, nullable=True)
     
-    # Relationships
     purchase_order = relationship("PurchaseOrder", back_populates="items")
     product = relationship("Product", back_populates="purchase_order_items")
 
@@ -497,22 +479,20 @@ class Purchase(Base):
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     supplier_name = Column(String(255))
     
-    # Financial fields
     subtotal = Column(DECIMAL(12, 2), default=0)
     vat_amount = Column(DECIMAL(12, 2), default=0)
     
-    # Additional costs for purchases
-    shipping_cost = Column(DECIMAL(12, 2), default=0, description="Shipping cost for the purchase")
-    labour_cost = Column(DECIMAL(12, 2), default=0, description="Labour cost for the purchase")
-    labour_cost_description = Column(Text, nullable=True, description="Description of labour work")
-    other_cost = Column(DECIMAL(12, 2), default=0, description="Other miscellaneous costs")
-    other_cost_description = Column(Text, nullable=True, description="Description of other costs")
+    # Additional costs - NO description parameter
+    shipping_cost = Column(DECIMAL(12, 2), default=0)
+    labour_cost = Column(DECIMAL(12, 2), default=0)
+    labour_cost_description = Column(Text, nullable=True)
+    other_cost = Column(DECIMAL(12, 2), default=0)
+    other_cost_description = Column(Text, nullable=True)
     
     total_amount = Column(DECIMAL(12, 2), nullable=False)
     purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Relationships
     branch = relationship("Branch", back_populates="purchases")
     items = relationship("PurchaseItem", back_populates="purchase", cascade="all, delete-orphan")
     purchase_order = relationship("PurchaseOrder")
@@ -527,7 +507,6 @@ class PurchaseItem(Base):
     quantity = Column(DECIMAL(12, 2), nullable=False)
     unit_cost = Column(DECIMAL(12, 2), nullable=False)
     
-    # Relationships
     purchase = relationship("Purchase", back_populates="items")
     product = relationship("Product", back_populates="purchase_items")
 
@@ -560,7 +539,6 @@ class Loan(Base):
     requires_approval = Column(Boolean, default=True)
     approval_status = Column(String(50), default="pending")
     
-    # Relationships
     branch = relationship("Branch", back_populates="loans")
     items = relationship("LoanItem", back_populates="loan", cascade="all, delete-orphan")
     payments = relationship("LoanPayment", back_populates="loan", cascade="all, delete-orphan")
@@ -579,7 +557,6 @@ class LoanItem(Base):
     line_total = Column(DECIMAL(12, 2), nullable=False)
     sale_item_id = Column(Integer, ForeignKey("sale_items.id"), nullable=True)
     
-    # Relationships
     loan = relationship("Loan", back_populates="items")
     product = relationship("Product", back_populates="loan_items")
     sale_item = relationship("SaleItem", back_populates="loan_items")
@@ -598,10 +575,9 @@ class LoanPayment(Base):
     notes = Column(Text, nullable=True)
     recorded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Relationships
     loan = relationship("Loan", back_populates="payments")
     recorder = relationship("User", back_populates="loan_payments")
     sale = relationship("Sale", back_populates="loan_payments")
@@ -623,7 +599,6 @@ class LoanSummary(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Relationships
     branch = relationship("Branch")
 
 
@@ -642,7 +617,6 @@ class StockMovement(Base):
     notes = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Relationships
     branch = relationship("Branch", back_populates="stock_movements")
     product = relationship("Product", back_populates="stock_movements")
     user = relationship("User", back_populates="stock_movements")
@@ -660,7 +634,6 @@ class Alert(Base):
     resolved = Column(Boolean, default=False)
     resolved_at = Column(DateTime(timezone=True))
     
-    # Relationships
     branch = relationship("Branch", back_populates="alerts")
     product = relationship("Product", back_populates="alerts")
 
@@ -691,7 +664,6 @@ class BackupRecord(Base):
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Relationship
     creator = relationship("User", foreign_keys=[created_by])
 
 
@@ -706,7 +678,6 @@ class SystemLog(Base):
     ip_address = Column(String(50), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Relationship
     user = relationship("User", foreign_keys=[user_id])
 
 
@@ -737,7 +708,6 @@ class DamagedGoods(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Relationships
     branch = relationship("Branch", foreign_keys=[branch_id], back_populates="damaged_goods")
     product = relationship("Product", foreign_keys=[product_id], back_populates="damaged_goods_reports")
     reporter = relationship("User", foreign_keys=[reported_by], back_populates="damaged_goods_reported")
@@ -774,7 +744,6 @@ class TempItem(Base):
     received_at = Column(DateTime(timezone=True), nullable=True)
     notes = Column(Text, nullable=True)
     
-    # Relationships
     registrar = relationship("User", foreign_keys=[registered_by])
     receiver = relationship("User", foreign_keys=[received_by])
 
@@ -832,12 +801,10 @@ class VATPurchase(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     
-    # Wallet payment fields
     use_wallet_payment = Column(Boolean, default=False)
     wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True)
     wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
     
-    # Relationships
     branch = relationship("Branch", foreign_keys=[branch_id], back_populates="vat_purchases")
     product = relationship("Product", foreign_keys=[product_id], back_populates="vat_purchases")
     creator = relationship("User", foreign_keys=[created_by], back_populates="vat_purchases_created")
@@ -891,10 +858,8 @@ class VATSale(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     
-    # Wallet transaction tracking
     wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
     
-    # Relationships
     sale = relationship("Sale", foreign_keys=[sale_id], back_populates="vat_sales")
     sale_item = relationship("SaleItem", foreign_keys=[sale_item_id], back_populates="vat_sale")
     vat_purchase = relationship("VATPurchase", foreign_keys=[vat_purchase_id], back_populates="vat_sales")
@@ -950,7 +915,6 @@ class VATSummary(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     
-    # Relationships
     branch = relationship("Branch", foreign_keys=[branch_id], back_populates="vat_summaries")
     creator = relationship("User", foreign_keys=[created_by], back_populates="vat_summaries_created")
     
@@ -972,7 +936,6 @@ class VATRateHistory(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Relationships
     creator = relationship("User", foreign_keys=[created_by], back_populates="vat_rates_created")
     
     __table_args__ = (
@@ -989,31 +952,26 @@ class Wallet(Base):
     wallet_number = Column(String(50), unique=True, nullable=False, index=True)
     wallet_name = Column(String(100), nullable=False)
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
-    wallet_type = Column(String(50), nullable=False)  # vat, regular, petty_cash, expense, custom
+    wallet_type = Column(String(50), nullable=False)
     wallet_purpose = Column(String(50), default=WalletPurpose.OTHER.value)
     
-    # Financial details
     balance = Column(DECIMAL(15, 2), default=0)
     currency = Column(String(3), default="ETB")
     
-    # Bank account integration (optional - can be null for cash-based wallets)
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
     
-    # Wallet settings
     is_active = Column(Boolean, default=True)
-    requires_approval = Column(Boolean, default=False)  # For high-value transactions
-    max_balance = Column(DECIMAL(15, 2), nullable=True)  # Optional max limit
-    min_balance = Column(DECIMAL(15, 2), nullable=True)  # Optional minimum balance alert
+    requires_approval = Column(Boolean, default=False)
+    max_balance = Column(DECIMAL(15, 2), nullable=True)
+    min_balance = Column(DECIMAL(15, 2), nullable=True)
     daily_limit = Column(DECIMAL(15, 2), nullable=True)
     transaction_limit = Column(DECIMAL(15, 2), nullable=True)
     
-    # Metadata
     description = Column(Text, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Relationships
     branch = relationship("Branch", back_populates="wallets")
     bank_account = relationship("BankAccount", back_populates="wallets")
     transactions = relationship(
@@ -1041,45 +999,37 @@ class WalletTransaction(Base):
     transaction_number = Column(String(50), unique=True, nullable=False, index=True)
     wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=False)
     
-    # Transaction details
-    transaction_type = Column(String(50), nullable=False)  # deposit, withdrawal, transfer, purchase, restock, refund
+    transaction_type = Column(String(50), nullable=False)
     transaction_method = Column(String(50), nullable=False, default=WalletTransactionMethod.CASH.value)
     amount = Column(DECIMAL(15, 2), nullable=False)
     
-    # For transfers between wallets
     from_wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True)
     to_wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True)
     
-    # Balance tracking
     balance_before = Column(DECIMAL(15, 2), nullable=False)
     balance_after = Column(DECIMAL(15, 2), nullable=False)
     
-    # Status tracking
     status = Column(String(50), default=WalletTransactionStatus.COMPLETED.value)
-    approval_status = Column(String(50), default="approved")  # pending, approved, rejected
+    approval_status = Column(String(50), default="approved")
     approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
     
-    # Reference to related business transactions
-    reference_type = Column(String(50), nullable=True)  # purchase_order, sale, refund, restock
+    reference_type = Column(String(50), nullable=True)
     reference_id = Column(Integer, nullable=True)
     reference_number = Column(String(100), nullable=True)
     
-    # Bank integration
-    bank_transaction_id = Column(String(100), nullable=True)  # Reference to bank statement
+    bank_transaction_id = Column(String(100), nullable=True)
     bank_reference = Column(String(100), nullable=True)
+    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
     
-    # Additional details
     description = Column(Text, nullable=True)
-    attachments = Column(Text, nullable=True)  # JSON array of attachment URLs
+    attachments = Column(Text, nullable=True)
     notes = Column(Text, nullable=True)
     
-    # Audit fields
     created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Relationships
     wallet = relationship(
         "Wallet", 
         foreign_keys=[wallet_id],
@@ -1097,6 +1047,7 @@ class WalletTransaction(Base):
     )
     creator = relationship("User", foreign_keys=[created_by], back_populates="wallet_transactions_created")
     approver = relationship("User", foreign_keys=[approved_by])
+    bank_account = relationship("BankAccount", foreign_keys=[bank_account_id])
     
     __table_args__ = (
         Index('idx_wallet_transaction_wallet', 'wallet_id'),
@@ -1115,30 +1066,24 @@ class BankTransaction(Base):
     id = Column(Integer, primary_key=True, index=True)
     bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=False)
     
-    # Transaction details from bank
     transaction_date = Column(DateTime(timezone=True), nullable=False)
-    transaction_type = Column(String(50), nullable=False)  # credit, debit
+    transaction_type = Column(String(50), nullable=False)
     amount = Column(DECIMAL(15, 2), nullable=False)
     description = Column(Text, nullable=True)
     reference = Column(String(100), nullable=True)
     
-    # Bank statement reference
     statement_date = Column(Date, nullable=True)
     statement_balance = Column(DECIMAL(15, 2), nullable=True)
     
-    # Reconciliation
     is_reconciled = Column(Boolean, default=False)
     reconciled_at = Column(DateTime(timezone=True), nullable=True)
     reconciled_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     
-    # Link to wallet transaction
     wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
     
-    # Metadata
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Relationships
     bank_account = relationship("BankAccount", back_populates="bank_transactions")
     wallet_transaction = relationship("WalletTransaction", foreign_keys=[wallet_transaction_id])
     reconciler = relationship("User", foreign_keys=[reconciled_by], back_populates="bank_transactions_reconciled")
@@ -1159,40 +1104,32 @@ class WalletSummary(Base):
     branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
     summary_date = Column(Date, nullable=False)
     
-    # Opening balances
     opening_balance = Column(DECIMAL(15, 2), default=0)
     
-    # Income
     total_deposits = Column(DECIMAL(15, 2), default=0)
     total_transfers_in = Column(DECIMAL(15, 2), default=0)
     
-    # Expenses
     total_withdrawals = Column(DECIMAL(15, 2), default=0)
     total_transfers_out = Column(DECIMAL(15, 2), default=0)
     total_purchases = Column(DECIMAL(15, 2), default=0)
     total_restocks = Column(DECIMAL(15, 2), default=0)
     total_refunds = Column(DECIMAL(15, 2), default=0)
     
-    # Closing balance
     closing_balance = Column(DECIMAL(15, 2), default=0)
     
-    # Statistics
     transaction_count = Column(Integer, default=0)
     average_transaction_amount = Column(DECIMAL(15, 2), default=0)
     highest_transaction = Column(DECIMAL(15, 2), default=0)
     lowest_transaction = Column(DECIMAL(15, 2), default=0)
     
-    # Bank reconciliation
     bank_balance_at_date = Column(DECIMAL(15, 2), nullable=True)
     is_reconciled = Column(Boolean, default=False)
     reconciled_at = Column(DateTime(timezone=True), nullable=True)
     
-    # Metadata
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Relationships
     wallet = relationship(
         "Wallet", 
         foreign_keys=[wallet_id],
