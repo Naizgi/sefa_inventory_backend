@@ -14,7 +14,7 @@ from app.schemas import (
 from app.utils.dependencies import get_current_user, require_admin
 from app.utils.permissions import require_loan_creation_privilege, require_loan_approval_privilege, require_privileged
 
-# Import wallet functions
+# Import wallet functions from the wallet router
 from app.routes.wallet import get_or_create_wallet, process_wallet_transaction
 from app.models import WalletTransactionType
 
@@ -577,10 +577,10 @@ def add_loan_payment(
         if not bank_account:
             raise HTTPException(status_code=404, detail="Bank account not found or inactive")
         
-        # Get or create wallet for the branch
+        # Get or create wallet for the branch - using the wallet router function
         wallet = get_or_create_wallet(db, loan.branch_id, "regular")
         
-        # Process wallet transaction (deposit)
+        # Process the deposit using the wallet router function
         transaction = process_wallet_transaction(
             db=db,
             wallet_id=wallet.id,
@@ -588,9 +588,10 @@ def add_loan_payment(
             amount=payment_data.amount,
             description=f"Loan payment from {loan.customer_name} - {loan.loan_number}",
             user_id=current_user.id,
+            transaction_method="cash",
             reference_type="loan_payment",
             reference_id=loan.id,
-            bank_account_id=payment_data.bank_account_id
+            bank_reference=str(payment_data.bank_account_id) if payment_data.bank_account_id else None
         )
         print(f"✅ Wallet deposited: {transaction.transaction_number} - Amount: {payment_data.amount} to wallet '{wallet.wallet_name}'")
     
@@ -677,10 +678,10 @@ def settle_loan(
         if not bank_account:
             raise HTTPException(status_code=404, detail="Bank account not found or inactive")
         
-        # Get or create wallet for the branch
+        # Get or create wallet for the branch - using the wallet router function
         wallet = get_or_create_wallet(db, loan.branch_id, "regular")
         
-        # Process wallet transaction (deposit)
+        # Process the deposit using the wallet router function
         transaction = process_wallet_transaction(
             db=db,
             wallet_id=wallet.id,
@@ -688,9 +689,10 @@ def settle_loan(
             amount=loan.remaining_amount,
             description=f"Loan settlement from {loan.customer_name} - {loan.loan_number}",
             user_id=current_user.id,
+            transaction_method="cash",
             reference_type="loan",
             reference_id=loan.id,
-            bank_account_id=settle_data.bank_account_id
+            bank_reference=str(settle_data.bank_account_id) if settle_data.bank_account_id else None
         )
         print(f"✅ Wallet deposited for settlement: {transaction.transaction_number} - Amount: {loan.remaining_amount} to wallet '{wallet.wallet_name}'")
     
