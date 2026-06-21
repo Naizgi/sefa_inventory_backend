@@ -11,7 +11,7 @@ from app.database import get_db
 from app.models import (
     User, Branch, Product, PurchaseOrder, PurchaseOrderItem,
     Sale, SaleItem, VATPurchase, VATSale, VATSummary, VATRateHistory,
-    VATStatus, Stock, StockMovement, BankAccount
+    VATStatus, Stock, StockMovement, BankAccount, Wallet
 )
 from app.schemas import (
     VATPurchaseCreate, VATPurchaseUpdate, VATPurchaseResponse,
@@ -333,7 +333,7 @@ def create_vat_sale(
     current_user: User = Depends(require_salesman)
 ):
     """Create a VAT sale record (when selling from stock)
-       When a VAT sale is created, the amount will be CREDITED to the VAT wallet."""
+       When a VAT sale is created, the amount will be CREDITED to the selected bank account's linked wallet."""
     
     vat_purchase = db.query(VATPurchase).filter(
         VATPurchase.id == sale_data.vat_purchase_id
@@ -460,34 +460,66 @@ def create_vat_sale(
     db.commit()
     db.refresh(vat_sale)
     
-    # ==================== CREDIT TO VAT WALLET ====================
+    # ==================== CREDIT TO THE SELECTED BANK ACCOUNT'S WALLET ====================
     # Calculate total amount to credit (total sale amount including VAT)
     total_sale_amount = vat_sale.total_amount_with_vat
     
-    try:
-        # Get VAT wallet for this branch
-        wallet = get_or_create_wallet(db, sale.branch_id, "vat")
+    # Determine which wallet to credit based on payment method
+    wallet_to_credit = None
+    wallet_name = "VAT Wallet"
+    
+    # Check if this is a bank transfer and we have a bank account selected
+    if sale_data.bank_account_id:
+        # Find the bank account
+        bank_account = db.query(BankAccount).filter(
+            BankAccount.id == sale_data.bank_account_id,
+            BankAccount.is_active == True
+        ).first()
         
+        if bank_account:
+            # Check if this bank account has a linked wallet
+            linked_wallet = db.query(Wallet).filter(
+                Wallet.bank_account_id == bank_account.id,
+                Wallet.branch_id == sale.branch_id,
+                Wallet.is_active == True
+            ).first()
+            
+            if linked_wallet:
+                wallet_to_credit = linked_wallet
+                wallet_name = linked_wallet.wallet_name or f"Wallet for {bank_account.bank_name}"
+                print(f"✅ Found linked wallet for bank account: {wallet_name} (ID: {linked_wallet.id})")
+            else:
+                print(f"⚠️ Bank account {bank_account.id} has no linked wallet, falling back to VAT wallet")
+        else:
+            print(f"⚠️ Bank account {sale_data.bank_account_id} not found")
+    
+    # If no specific wallet found, fall back to VAT wallet
+    if not wallet_to_credit:
+        wallet_to_credit = get_or_create_wallet(db, sale.branch_id, "vat")
+        wallet_name = wallet_to_credit.wallet_name or "VAT Wallet"
+        print(f"ℹ️ Using default VAT wallet: {wallet_name} (ID: {wallet_to_credit.id})")
+    
+    try:
         # Process wallet transaction (CREDIT amount - deposit)
         wallet_transaction = process_wallet_transaction(
             db=db,
-            wallet_id=wallet.id,
+            wallet_id=wallet_to_credit.id,
             transaction_type=WalletTransactionType.DEPOSIT.value,
             amount=total_sale_amount,
             description=f"VAT Sale #{vat_sale.vat_sale_number} - Customer: {sale.customer_name or 'Walk-in'} - Qty: {quantity} of {vat_purchase.product_name}",
             user_id=current_user.id,
-            transaction_method="cash",
+            transaction_method=sale_data.payment_method or "cash",
             reference_type="vat_sale",
             reference_id=vat_sale.id
         )
-        print(f"✅ VAT Wallet credited: {wallet_transaction.transaction_number} - Amount: {total_sale_amount} to wallet '{wallet.wallet_name}'")
+        print(f"✅ Wallet credited: {wallet_transaction.transaction_number} - Amount: {total_sale_amount} to wallet '{wallet_name}'")
         
         # Update vat_sale with transaction reference
         vat_sale.wallet_transaction_id = wallet_transaction.id
         db.commit()
         
     except Exception as wallet_error:
-        print(f"⚠️ VAT Wallet credit failed: {wallet_error}")
+        print(f"⚠️ Wallet credit failed: {wallet_error}")
         # Don't fail the sale if wallet credit fails, just log it
         # This ensures the sale is still recorded even if wallet has issues
     
