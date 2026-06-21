@@ -1041,7 +1041,8 @@ class VATSaleBase(BaseModel):
 
 
 class VATSaleCreate(VATSaleBase):
-    pass
+    bank_account_id: Optional[int] = None
+    payment_method: Optional[str] = "cash"
 
 
 class VATSaleResponse(VATSaleBase):
