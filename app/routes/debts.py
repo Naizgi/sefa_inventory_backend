@@ -8,8 +8,8 @@ from decimal import Decimal
 
 from app.database import get_db
 from app import models, schemas
-from app.auth import get_current_user, get_current_active_user, get_current_admin_user
-from app.routers.wallets import process_wallet_transaction
+from app.utils.dependencies import get_current_user, get_current_admin_user
+from app.routes.wallet import process_wallet_transaction
 
 router = APIRouter(prefix="/debts", tags=["Debts"])
 
