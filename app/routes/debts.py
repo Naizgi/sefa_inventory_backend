@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func, desc, asc
@@ -8,11 +7,82 @@ from decimal import Decimal
 from app.database import get_db
 from app import models, schemas
 from app.utils.dependencies import get_current_user, get_current_active_user, require_admin
-from .wallet import process_wallet_transaction
 
 router = APIRouter(prefix="/debts", tags=["Debts"])
 
 print("✅ Debt router module loaded!")
+
+
+# ==================== WALLET TRANSACTION HELPER ====================
+def process_wallet_transaction(
+    db: Session,
+    wallet_id: int,
+    amount: Decimal,
+    transaction_type: str,
+    description: str,
+    reference_type: str,
+    reference_id: int,
+    user_id: int
+) -> models.WalletTransaction:
+    """Process a wallet transaction - copied from wallet.py to avoid circular import"""
+    from app.models import Wallet, WalletTransaction, WalletTransactionStatus
+    import secrets
+    from datetime import datetime
+    
+    wallet = db.query(Wallet).filter(Wallet.id == wallet_id).first()
+    
+    if not wallet:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Wallet not found"
+        )
+    
+    if not wallet.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Wallet is not active"
+        )
+    
+    amount_decimal = Decimal(str(amount))
+    balance_before = wallet.balance
+    
+    if transaction_type == "withdrawal":
+        if wallet.balance < amount_decimal:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Insufficient wallet balance. Available: {wallet.balance}, Required: {amount_decimal}"
+            )
+        wallet.balance -= amount_decimal
+    elif transaction_type == "deposit":
+        wallet.balance += amount_decimal
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid transaction type"
+        )
+    
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    random_suffix = secrets.token_hex(3).upper()
+    transaction_number = f"TXN-{timestamp}-{random_suffix}"
+    
+    transaction = models.WalletTransaction(
+        transaction_number=transaction_number,
+        wallet_id=wallet_id,
+        transaction_type=transaction_type,
+        amount=amount_decimal,
+        balance_before=balance_before,
+        balance_after=wallet.balance,
+        status=WalletTransactionStatus.COMPLETED.value,
+        reference_type=reference_type,
+        reference_id=reference_id,
+        description=description,
+        created_by=user_id
+    )
+    
+    db.add(transaction)
+    db.flush()
+    
+    return transaction
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -298,7 +368,7 @@ async def update_debt(
 async def delete_debt(
     debt_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_admin)  # FIXED: Use require_admin
+    current_user: models.User = Depends(require_admin)
 ):
     """Delete a debt (Admin only)"""
     debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
@@ -454,7 +524,7 @@ async def make_debt_payment(
 async def approve_debt(
     debt_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_admin)  # FIXED: Use require_admin
+    current_user: models.User = Depends(require_admin)
 ):
     """Approve a debt (Admin only)"""
     debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
@@ -485,7 +555,7 @@ async def approve_debt(
 async def reject_debt(
     debt_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_admin)  # FIXED: Use require_admin
+    current_user: models.User = Depends(require_admin)
 ):
     """Reject a debt (Admin only)"""
     debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
