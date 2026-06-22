@@ -1,4 +1,4 @@
-# app/routers/debts.py
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func, desc, asc
@@ -9,7 +9,7 @@ from decimal import Decimal
 from app.database import get_db
 from app import models, schemas
 from app.utils.dependencies import get_current_user, get_current_active_user, require_admin
-from app.routes.wallet import process_wallet_transaction
+from .wallet import process_wallet_transaction
 
 router = APIRouter(prefix="/debts", tags=["Debts"])
 
