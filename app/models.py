@@ -24,6 +24,20 @@ class LoanStatus(str, enum.Enum):
     OVERDUE = "overdue"
     CANCELLED = "cancelled"
 
+class DebtStatus(str, enum.Enum):
+    ACTIVE = "active"
+    PARTIALLY_PAID = "partially_paid"
+    SETTLED = "settled"
+    OVERDUE = "overdue"
+    CANCELLED = "cancelled"
+
+class DebtPaymentMethod(str, enum.Enum):
+    CASH = "cash"
+    WALLET = "wallet"
+    PRODUCT = "product"
+    MIXED = "mixed"
+    BANK_TRANSFER = "bank_transfer"
+
 class LoanPaymentMethod(str, enum.Enum):
     CASH = "cash"
     TICKET = "ticket"
@@ -117,6 +131,7 @@ class Branch(Base):
     stock_movements = relationship("StockMovement", back_populates="branch")
     alerts = relationship("Alert", back_populates="branch")
     loans = relationship("Loan", back_populates="branch", cascade="all, delete-orphan")
+    debts = relationship("Debt", back_populates="branch", cascade="all, delete-orphan")
     bank_accounts = relationship("BankAccount", back_populates="branch", cascade="all, delete-orphan")
     damaged_goods = relationship("DamagedGoods", back_populates="branch", cascade="all, delete-orphan")
     vat_purchases = relationship("VATPurchase", back_populates="branch", cascade="all, delete-orphan")
@@ -154,6 +169,7 @@ class Product(Base):
     damaged_goods_reports = relationship("DamagedGoods", back_populates="product", cascade="all, delete-orphan")
     vat_purchases = relationship("VATPurchase", back_populates="product", cascade="all, delete-orphan")
     vat_sales = relationship("VATSale", back_populates="product", cascade="all, delete-orphan")
+    debt_product_payments = relationship("DebtProductPayment", back_populates="product")
 
 
 # ==================== USER MODEL ====================
@@ -178,6 +194,10 @@ class User(Base):
     loans_created = relationship("Loan", foreign_keys="Loan.created_by", back_populates="creator")
     loans_approved = relationship("Loan", foreign_keys="Loan.approved_by", back_populates="approver")
     loan_payments = relationship("LoanPayment", back_populates="recorder")
+    
+    debts_created = relationship("Debt", foreign_keys="Debt.created_by", back_populates="creator")
+    debts_approved = relationship("Debt", foreign_keys="Debt.approved_by", back_populates="approver")
+    debt_payments = relationship("DebtPayment", back_populates="recorder")
     
     damaged_goods_reported = relationship("DamagedGoods", foreign_keys="DamagedGoods.reported_by", back_populates="reporter")
     damaged_goods_approved = relationship("DamagedGoods", foreign_keys="DamagedGoods.approved_by", back_populates="approver")
@@ -602,6 +622,140 @@ class LoanSummary(Base):
     branch = relationship("Branch")
 
 
+# ==================== DEBT MODELS ====================
+class Debt(Base):
+    __tablename__ = "debts"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    debt_number = Column(String(50), unique=True, nullable=False, index=True)
+    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    
+    supplier_name = Column(String(255), nullable=False)
+    supplier_phone = Column(String(50), nullable=True)
+    supplier_email = Column(String(255), nullable=True)
+    
+    debt_date = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    total_amount = Column(DECIMAL(12, 2), nullable=False)
+    paid_amount = Column(DECIMAL(12, 2), default=0)
+    remaining_amount = Column(DECIMAL(12, 2), nullable=False)
+    
+    description = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    
+    status = Column(String(50), default=DebtStatus.ACTIVE.value)
+    
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    requires_approval = Column(Boolean, default=True)
+    approval_status = Column(String(50), default="pending")
+    
+    branch = relationship("Branch", back_populates="debts")
+    payments = relationship("DebtPayment", back_populates="debt", cascade="all, delete-orphan")
+    creator = relationship("User", foreign_keys=[created_by], back_populates="debts_created")
+    approver = relationship("User", foreign_keys=[approved_by], back_populates="debts_approved")
+    
+    __table_args__ = (
+        Index('idx_debt_branch', 'branch_id'),
+        Index('idx_debt_status', 'status'),
+        Index('idx_debt_supplier', 'supplier_name'),
+        Index('idx_debt_date', 'debt_date'),
+    )
+
+
+class DebtPayment(Base):
+    __tablename__ = "debt_payments"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    debt_id = Column(Integer, ForeignKey("debts.id", ondelete="CASCADE"), nullable=False)
+    payment_number = Column(String(50), unique=True, nullable=False, index=True)
+    payment_date = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    
+    amount = Column(DECIMAL(12, 2), nullable=False)
+    payment_method = Column(String(50), nullable=False)
+    payment_type = Column(String(50), nullable=False, default="cash")  # cash, wallet, product, mixed
+    
+    reference_number = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+    
+    recorded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    bank_account_id = Column(Integer, ForeignKey("bank_accounts.id"), nullable=True)
+    wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True)
+    wallet_transaction_id = Column(Integer, ForeignKey("wallet_transactions.id"), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    debt = relationship("Debt", back_populates="payments")
+    recorder = relationship("User", back_populates="debt_payments")
+    bank_account = relationship("BankAccount")
+    wallet = relationship("Wallet", foreign_keys=[wallet_id])
+    wallet_transaction = relationship("WalletTransaction", foreign_keys=[wallet_transaction_id])
+    product_payments = relationship("DebtProductPayment", back_populates="debt_payment", cascade="all, delete-orphan")
+    
+    __table_args__ = (
+        Index('idx_debt_payment_debt', 'debt_id'),
+        Index('idx_debt_payment_date', 'payment_date'),
+        Index('idx_debt_payment_method', 'payment_method'),
+        Index('idx_debt_payment_type', 'payment_type'),
+    )
+
+
+class DebtProductPayment(Base):
+    __tablename__ = "debt_product_payments"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    debt_payment_id = Column(Integer, ForeignKey("debt_payments.id", ondelete="CASCADE"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    
+    quantity = Column(DECIMAL(12, 2), nullable=False)
+    unit_price = Column(DECIMAL(12, 2), nullable=False)
+    total_amount = Column(DECIMAL(12, 2), nullable=False)
+    
+    stock_movement_id = Column(Integer, ForeignKey("stock_movements.id"), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    debt_payment = relationship("DebtPayment", back_populates="product_payments")
+    product = relationship("Product", back_populates="debt_product_payments")
+    stock_movement = relationship("StockMovement", foreign_keys=[stock_movement_id])
+    
+    __table_args__ = (
+        Index('idx_debt_product_payment', 'debt_payment_id'),
+        Index('idx_debt_product_product', 'product_id'),
+    )
+
+
+class DebtSummary(Base):
+    __tablename__ = "debt_summaries"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    summary_date = Column(DateTime(timezone=True), nullable=False)
+    
+    total_debts_issued = Column(Integer, default=0)
+    total_debt_amount = Column(DECIMAL(12, 2), default=0)
+    total_repayments = Column(DECIMAL(12, 2), default=0)
+    total_outstanding = Column(DECIMAL(12, 2), default=0)
+    active_debts_count = Column(Integer, default=0)
+    overdue_debts_count = Column(Integer, default=0)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    branch = relationship("Branch")
+    
+    __table_args__ = (
+        UniqueConstraint('branch_id', 'summary_date', name='unique_branch_debt_summary_date'),
+        Index('idx_debt_summary_branch', 'branch_id'),
+        Index('idx_debt_summary_date', 'summary_date'),
+    )
+
+
 # ==================== STOCK MOVEMENT MODEL ====================
 class StockMovement(Base):
     __tablename__ = "stock_movements"
@@ -620,6 +774,7 @@ class StockMovement(Base):
     branch = relationship("Branch", back_populates="stock_movements")
     product = relationship("Product", back_populates="stock_movements")
     user = relationship("User", back_populates="stock_movements")
+    debt_product_payments = relationship("DebtProductPayment", back_populates="stock_movement")
 
 
 # ==================== ALERT MODEL ====================

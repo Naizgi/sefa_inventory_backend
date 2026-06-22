@@ -19,6 +19,20 @@ class LoanStatus(str, Enum):
     OVERDUE = "overdue"
     CANCELLED = "cancelled"
 
+class DebtStatus(str, Enum):
+    ACTIVE = "active"
+    PARTIALLY_PAID = "partially_paid"
+    SETTLED = "settled"
+    OVERDUE = "overdue"
+    CANCELLED = "cancelled"
+
+class DebtPaymentMethod(str, Enum):
+    CASH = "cash"
+    WALLET = "wallet"
+    PRODUCT = "product"  # Payment using products (deducted from stock)
+    MIXED = "mixed"
+    BANK_TRANSFER = "bank_transfer"
+
 class LoanPaymentMethod(str, Enum):
     CASH = "cash"
     TICKET = "ticket"
@@ -605,6 +619,115 @@ class ReceivePurchaseOrder(BaseModel):
     actual_delivery_date: date
 
 
+# ==================== DEBT SCHEMAS ====================
+class DebtBase(BaseModel):
+    supplier_name: str = Field(min_length=2, max_length=255)
+    supplier_phone: Optional[str] = None
+    supplier_email: Optional[EmailStr] = None
+    amount: Decimal = Field(gt=0, description="Total debt amount")
+    description: Optional[str] = Field(None, description="Description of what the debt is for")
+    notes: Optional[str] = None
+
+class DebtCreate(DebtBase):
+    branch_id: int
+    # Optional fields for initial payment
+    initial_payment_amount: Decimal = Field(default=0, ge=0)
+    initial_payment_method: Optional[DebtPaymentMethod] = None
+    initial_payment_reference: Optional[str] = None
+    bank_account_id: Optional[int] = None
+    wallet_id: Optional[int] = None
+
+class DebtUpdate(BaseModel):
+    status: Optional[DebtStatus] = None
+    notes: Optional[str] = None
+    description: Optional[str] = None
+    supplier_name: Optional[str] = Field(None, min_length=2, max_length=255)
+    supplier_phone: Optional[str] = None
+    supplier_email: Optional[EmailStr] = None
+
+class DebtPaymentBase(BaseModel):
+    amount: Decimal = Field(gt=0)
+    payment_method: DebtPaymentMethod
+    reference_number: Optional[str] = None
+    notes: Optional[str] = None
+    bank_account_id: Optional[int] = None
+    wallet_id: Optional[int] = None
+
+class DebtProductPaymentItem(BaseModel):
+    product_id: int
+    quantity: Decimal = Field(gt=0)
+    unit_price: Decimal = Field(gt=0)
+    total_amount: Decimal = Field(gt=0)
+
+class DebtPaymentCreate(DebtPaymentBase):
+    # Product payment details (if payment method is PRODUCT)
+    product_items: Optional[List[DebtProductPaymentItem]] = None
+
+class DebtPaymentResponse(DebtPaymentBase):
+    id: int
+    payment_number: str
+    payment_date: datetime
+    recorded_by: str
+    created_at: datetime
+    payment_type: str = Field(..., description="cash, wallet, product, or mixed")
+    product_payment_items: Optional[List[DebtProductPaymentItem]] = None
+    # Stock movement references for product payments
+    stock_movement_ids: Optional[List[int]] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class DebtResponse(DebtBase):
+    id: int
+    debt_number: str
+    branch_id: int
+    debt_date: datetime
+    paid_amount: Decimal = Field(default=0)
+    remaining_amount: Decimal = Field(default=0)
+    status: DebtStatus
+    payments: List[DebtPaymentResponse] = []
+    created_by: str
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class DebtSettleRequest(BaseModel):
+    amount: Decimal = Field(gt=0)
+    payment_method: DebtPaymentMethod
+    reference_number: Optional[str] = None
+    notes: Optional[str] = None
+    bank_account_id: Optional[int] = None
+    wallet_id: Optional[int] = None
+    product_items: Optional[List[DebtProductPaymentItem]] = None
+
+class DebtSummaryResponse(BaseModel):
+    summary_date: date
+    branch_id: int
+    total_debts_issued: int
+    total_debt_amount: Decimal
+    total_repayments: Decimal
+    total_outstanding: Decimal
+    active_debts_count: int
+    overdue_debts_count: int
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class DebtReport(BaseModel):
+    date_range: DateRange
+    total_debts: int
+    total_debt_value: Decimal
+    total_repayments: Decimal
+    total_outstanding: Decimal
+    average_debt_size: Decimal
+    repayment_rate: float
+    debts_by_status: dict
+    daily_breakdown: List[dict]
+    supplier_breakdown: List[dict]  # Breakdown by supplier
+    payment_method_breakdown: dict  # Breakdown by payment method
+
+
 # ==================== LOAN SCHEMAS ====================
 class LoanItemBase(BaseModel):
     product_id: int
@@ -723,7 +846,9 @@ class CombinedSalesReport(BaseModel):
     top_ticket_items: List[dict] = []
     ticket_summary: dict
     loan_summary: Optional[LoanReport] = None
+    debt_summary: Optional[DebtReport] = None
     loan_repayments: float = 0
+    debt_repayments: float = 0
     payment_method_breakdown: dict = {}
 
 
@@ -889,8 +1014,7 @@ class SystemLogResponse(SystemLogBase):
     model_config = ConfigDict(from_attributes=True)
 
 
-# Settings update request models
-class GeneralSettingsUpdate(BaseModel):
+# Settings update request modelsclass GeneralSettingsUpdate(BaseModel):
     system_name: str = Field(default="Inventory System")
     timezone: str = Field(default="Africa/Addis_Ababa")
     date_format: str = Field(default="YYYY-MM-DD")

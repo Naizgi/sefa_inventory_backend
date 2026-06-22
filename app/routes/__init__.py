@@ -1,3 +1,4 @@
+# app/routes/__init__.py
 from .auth import router as auth_router
 from .branches import router as branches_router
 from .products import router as products_router
@@ -13,7 +14,11 @@ from .temp_items_routes import router as temp_items_router
 from .settings_router import router as settings_router
 from .vat import router as vat_router  # VAT tracking router
 from .wallet import router as wallet_router  # Wallet management router
-from .damaged_goods_router import router as damaged_goods_router  # ADD THIS LINE - Damaged goods router
+from .damaged_goods_router import router as damaged_goods_router  # Damaged goods router
+
+# ADD THIS LINE - Import the debt router
+# Note: Make sure the file exists at app/routers/debts.py
+from app.routers.debts import router as debt_router  # Debt tracking router
 
 
 # Export all routers
@@ -29,9 +34,10 @@ __all__ = [
     'alerts_router',
     'dashboard_router',
     'loan_router',
+    'debt_router',  # ADD THIS LINE - Export debt router
     'temp_items_router',
     'settings_router',
     'vat_router',
     'wallet_router',
-    'damaged_goods_router',  # ADD THIS LINE - Export damaged goods router
+    'damaged_goods_router',
 ]

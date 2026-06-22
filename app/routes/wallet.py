@@ -1,3 +1,4 @@
+# app/routes/wallet.py (or app/routers/wallet.py)
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
@@ -1231,6 +1232,55 @@ def get_wallet_performance_report(
     )
 
 
+# ==================== WALLET DELETE ENDPOINT ====================
+
+@router.delete("/{wallet_id}")
+def delete_wallet(
+    wallet_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Delete a wallet and all related data (Admin only)"""
+    
+    wallet = db.query(Wallet).filter(Wallet.id == wallet_id).first()
+    if not wallet:
+        raise HTTPException(status_code=404, detail="Wallet not found")
+    
+    # Check if wallet has balance
+    if wallet.balance > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete wallet with balance. Current balance: {float(wallet.balance)}. Please withdraw or transfer the balance first."
+        )
+    
+    wallet_name = wallet.wallet_name
+    wallet_number = wallet.wallet_number
+    
+    # Delete related records in order (respecting foreign keys)
+    
+    # 1. Delete wallet summaries
+    db.query(WalletSummary).filter(
+        WalletSummary.wallet_id == wallet_id
+    ).delete()
+    
+    # 2. Delete wallet transactions (both sent and received)
+    db.query(WalletTransaction).filter(
+        (WalletTransaction.wallet_id == wallet_id) |
+        (WalletTransaction.from_wallet_id == wallet_id) |
+        (WalletTransaction.to_wallet_id == wallet_id)
+    ).delete()
+    
+    # 3. Delete the wallet
+    db.delete(wallet)
+    db.commit()
+    
+    return {
+        "success": True,
+        "message": f"Wallet '{wallet_name}' ({wallet_number}) deleted successfully",
+        "wallet_id": wallet_id
+    }
+
+
 # ==================== INFO ENDPOINT ====================
 
 @router.get("/info")
@@ -1290,56 +1340,9 @@ def wallet_info(current_user: User = Depends(get_current_user)):
             ],
             "reports": [
                 {"path": "/performance-report", "method": "GET", "description": "Get performance report"}
+            ],
+            "delete": [
+                {"path": "/{wallet_id}", "method": "DELETE", "description": "Delete wallet (only if balance is 0)"}
             ]
         }
-    }
-    
-    
-    
-    # ==================== WALLET DELETE ENDPOINT ====================
-
-@router.delete("/{wallet_id}")
-def delete_wallet(
-    wallet_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
-):
-    """Delete a wallet and all related data (Admin only)"""
-    
-    wallet = db.query(Wallet).filter(Wallet.id == wallet_id).first()
-    if not wallet:
-        raise HTTPException(status_code=404, detail="Wallet not found")
-    
-    # Check if wallet has balance
-    if wallet.balance > 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot delete wallet with balance. Current balance: {float(wallet.balance)}. Please withdraw or transfer the balance first."
-        )
-    
-    wallet_name = wallet.wallet_name
-    wallet_number = wallet.wallet_number
-    
-    # Delete related records in order (respecting foreign keys)
-    
-    # 1. Delete wallet summaries
-    db.query(WalletSummary).filter(
-        WalletSummary.wallet_id == wallet_id
-    ).delete()
-    
-    # 2. Delete wallet transactions (both sent and received)
-    db.query(WalletTransaction).filter(
-        (WalletTransaction.wallet_id == wallet_id) |
-        (WalletTransaction.from_wallet_id == wallet_id) |
-        (WalletTransaction.to_wallet_id == wallet_id)
-    ).delete()
-    
-    # 3. Delete the wallet
-    db.delete(wallet)
-    db.commit()
-    
-    return {
-        "success": True,
-        "message": f"Wallet '{wallet_name}' ({wallet_number}) deleted successfully",
-        "wallet_id": wallet_id
     }

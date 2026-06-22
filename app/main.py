@@ -26,6 +26,7 @@ from app.routes import (
 )
 from app.routes.vat import router as vat_router
 from app.routes.wallet import router as wallet_router
+from app.routers.debts import router as debt_router  # ADD THIS LINE - Import debt router
 
 # ==================== SCHEDULER ====================
 scheduler = BackgroundScheduler()
@@ -176,6 +177,7 @@ app.include_router(reports_router)
 app.include_router(alerts_router)
 app.include_router(dashboard_router)
 app.include_router(loan_router)
+app.include_router(debt_router)  # ADD THIS LINE - Register the debt router
 app.include_router(purchase_router)
 app.include_router(temp_items_router)
 app.include_router(settings_router)
@@ -284,6 +286,52 @@ def db_info(current_user: User = Depends(get_current_user)):
             "database_type": "Other",
             "url": settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "hidden"
         }
+
+# ==================== DEBT ROUTES OVERVIEW ====================
+@app.get("/api/debt/info")
+def debt_info(current_user: User = Depends(get_current_user)):
+    """Get Debt system information"""
+    return {
+        "module": "Debt Tracking System",
+        "version": "1.0.0",
+        "description": "Track company debts to suppliers and manage repayments",
+        "features": [
+            "Record debts with supplier information",
+            "Track payments via cash, wallet, or products",
+            "Automatic stock deduction for product payments",
+            "Wallet integration for cash payments",
+            "Comprehensive debt reports and summaries",
+            "Approval workflow for debt creation",
+            "Supplier-specific debt tracking"
+        ],
+        "endpoints": [
+            {"path": "/debts/", "methods": ["GET", "POST"], "description": "List and create debts"},
+            {"path": "/debts/{debt_id}", "methods": ["GET", "PUT"], "description": "View and update debt"},
+            {"path": "/debts/{debt_id}/pay", "methods": ["POST"], "description": "Make a payment towards debt"},
+            {"path": "/debts/{debt_id}/payments", "methods": ["GET"], "description": "Get all payments for a debt"},
+            {"path": "/debts/{debt_id}/approve", "methods": ["POST"], "description": "Approve a debt (Admin only)"},
+            {"path": "/debts/{debt_id}/reject", "methods": ["POST"], "description": "Reject a debt (Admin only)"},
+            {"path": "/debts/summary/", "methods": ["GET"], "description": "Get debt summary"},
+            {"path": "/debts/report/", "methods": ["GET"], "description": "Get comprehensive debt report"},
+            {"path": "/debts/by-supplier/{supplier_name}", "methods": ["GET"], "description": "Get debts by supplier"},
+            {"path": "/debts/dashboard/stats/", "methods": ["GET"], "description": "Get dashboard statistics"},
+            {"path": "/debts/payment/{payment_id}", "methods": ["GET"], "description": "Get payment details"}
+        ],
+        "payment_methods": [
+            {"method": "cash", "description": "Cash payment"},
+            {"method": "wallet", "description": "Payment from wallet (deducts from wallet balance)"},
+            {"method": "product", "description": "Payment using products (deducts from stock)"},
+            {"method": "mixed", "description": "Combination of wallet and product payment"},
+            {"method": "bank_transfer", "description": "Bank transfer payment"}
+        ],
+        "debt_statuses": [
+            {"status": "active", "description": "Debt is active with full balance"},
+            {"status": "partially_paid", "description": "Some payments have been made"},
+            {"status": "settled", "description": "Debt has been fully paid"},
+            {"status": "overdue", "description": "Debt is overdue"},
+            {"status": "cancelled", "description": "Debt has been cancelled"}
+        ]
+    }
 
 # ==================== VAT ROUTES OVERVIEW ====================
 @app.get("/api/vat/info")
