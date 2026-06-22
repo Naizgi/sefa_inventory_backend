@@ -26,7 +26,7 @@ from app.routes import (
 )
 from app.routes.vat import router as vat_router
 from app.routes.wallet import router as wallet_router
-from app.routers.debts import router as debt_router  # ADD THIS LINE - Import debt router
+from app.routes.debts import router as debt_router  # ADD THIS LINE - Import debt router
 
 # ==================== SCHEDULER ====================
 scheduler = BackgroundScheduler()

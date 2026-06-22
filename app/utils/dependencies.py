@@ -1,262 +1,868 @@
-# app/utils/dependencies.py
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, HTTPBearer
+# app/routes/debts.py
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from typing import Optional
+from sqlalchemy import and_, or_, func, desc, asc
+from typing import List, Optional
+from datetime import datetime, date, timedelta
+from decimal import Decimal
+
 from app.database import get_db
-from app.models import User
-from app.config import settings
-import jwt
+from app import models, schemas
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
-security = HTTPBearer(auto_error=False)
+# Import from dependencies - use require_admin and require_privileged
+from app.utils.dependencies import (
+    get_current_user, 
+    get_current_active_user,
+    require_admin,
+    require_privileged
+)
+
+from app.routes.wallet import process_wallet_transaction
+
+router = APIRouter(prefix="/debts", tags=["Debts"])
+
+print("✅ Debt router module loaded!")
 
 
-def get_current_user(
+# ==================== HELPER FUNCTIONS ====================
+
+def generate_debt_number(db: Session) -> str:
+    """Generate a unique debt number"""
+    today = datetime.now()
+    prefix = f"DEBT-{today.year}{today.month:02d}{today.day:02d}-"
+    
+    count = db.query(models.Debt).filter(
+        models.Debt.created_at >= today.replace(hour=0, minute=0, second=0)
+    ).count()
+    
+    return f"{prefix}{count + 1:04d}"
+
+
+def generate_payment_number(db: Session) -> str:
+    """Generate a unique payment number"""
+    today = datetime.now()
+    prefix = f"PAY-{today.year}{today.month:02d}{today.day:02d}-"
+    
+    count = db.query(models.DebtPayment).filter(
+        models.DebtPayment.created_at >= today.replace(hour=0, minute=0, second=0)
+    ).count()
+    
+    return f"{prefix}{count + 1:04d}"
+
+
+def update_debt_status(debt: models.Debt) -> None:
+    """Update debt status based on paid amount"""
+    if debt.remaining_amount <= 0:
+        debt.status = models.DebtStatus.SETTLED.value
+    elif debt.paid_amount > 0:
+        debt.status = models.DebtStatus.PARTIALLY_PAID.value
+    else:
+        debt.status = models.DebtStatus.ACTIVE.value
+
+
+def process_product_payment(
+    db: Session,
+    debt_payment: models.DebtPayment,
+    product_items: List[schemas.DebtProductPaymentItem],
+    branch_id: int,
+    user_id: int
+) -> List[models.DebtProductPayment]:
+    """Process product payments and deduct from stock"""
+    product_payments = []
+    
+    for item in product_items:
+        # Get product stock
+        stock = db.query(models.Stock).filter(
+            models.Stock.branch_id == branch_id,
+            models.Stock.product_id == item.product_id
+        ).first()
+        
+        if not stock:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Product {item.product_id} not found in stock"
+            )
+        
+        if stock.quantity < item.quantity:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Insufficient stock for product {item.product_id}. Available: {stock.quantity}, Required: {item.quantity}"
+            )
+        
+        # Deduct from stock
+        stock.quantity -= item.quantity
+        
+        # Create stock movement
+        stock_movement = models.StockMovement(
+            branch_id=branch_id,
+            product_id=item.product_id,
+            user_id=user_id,
+            change_qty=-item.quantity,
+            movement_type="debt_payment",
+            with_vat=True,
+            notes=f"Debt payment - product used to settle debt"
+        )
+        db.add(stock_movement)
+        db.flush()
+        
+        # Create debt product payment record
+        product_payment = models.DebtProductPayment(
+            debt_payment_id=debt_payment.id,
+            product_id=item.product_id,
+            quantity=item.quantity,
+            unit_price=item.unit_price,
+            total_amount=item.total_amount,
+            stock_movement_id=stock_movement.id
+        )
+        db.add(product_payment)
+        db.flush()
+        
+        product_payments.append(product_payment)
+    
+    return product_payments
+
+
+# ==================== DEBT CRUD OPERATIONS ====================
+
+@router.post("/", response_model=schemas.DebtResponse, status_code=status.HTTP_201_CREATED)
+async def create_debt(
+    debt_data: schemas.DebtCreate,
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme)
+    current_user: models.User = Depends(require_privileged)  # Use require_privileged
 ):
     """
-    Get current user from JWT token.
-    Raises 401 if token is invalid or user not found.
+    Create a new debt record
     """
-    try:
-        payload = jwt.decode(
-            token,
-            settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM]
-        )
-
-        print("🔍 PAYLOAD:", payload)
-
-        user_id = payload.get("user_id")
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token"
-            )
-
-        user = db.query(User).filter(User.id == user_id).first()
-
-        print("👤 USER:", user)
-
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found"
-            )
-
-        return user
-
-    except Exception as e:
-        print("❌ AUTH ERROR:", e)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials"
-        )
-
-
-def get_current_user_optional(
-    db: Session = Depends(get_db),
-    token: Optional[str] = Depends(oauth2_scheme)
-) -> Optional[User]:
-    """
-    Get current user from JWT token if present.
-    Returns None if token is invalid or not provided.
-    Does NOT raise exceptions for missing/invalid tokens.
-    """
-    if token is None:
-        return None
+    # Generate debt number
+    debt_number = generate_debt_number(db)
     
-    try:
-        payload = jwt.decode(
-            token,
-            settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM]
+    # Create debt
+    debt = models.Debt(
+        debt_number=debt_number,
+        branch_id=debt_data.branch_id,
+        supplier_name=debt_data.supplier_name,
+        supplier_phone=debt_data.supplier_phone,
+        supplier_email=debt_data.supplier_email,
+        total_amount=debt_data.amount,
+        paid_amount=debt_data.initial_payment_amount if debt_data.initial_payment_amount else 0,
+        remaining_amount=debt_data.amount - (debt_data.initial_payment_amount if debt_data.initial_payment_amount else 0),
+        description=debt_data.description,
+        notes=debt_data.notes,
+        status=models.DebtStatus.ACTIVE.value,
+        created_by=current_user.id,
+        requires_approval=current_user.role != "admin",
+        approval_status="pending" if current_user.role != "admin" else "approved"
+    )
+    
+    db.add(debt)
+    db.flush()
+    
+    # Process initial payment if any
+    if debt_data.initial_payment_amount and debt_data.initial_payment_amount > 0:
+        payment_number = generate_payment_number(db)
+        
+        payment = models.DebtPayment(
+            debt_id=debt.id,
+            payment_number=payment_number,
+            amount=debt_data.initial_payment_amount,
+            payment_method=debt_data.initial_payment_method or models.DebtPaymentMethod.CASH.value,
+            payment_type=debt_data.initial_payment_method or models.DebtPaymentMethod.CASH.value,
+            reference_number=debt_data.initial_payment_reference,
+            notes=f"Initial payment for debt {debt_number}",
+            recorded_by=current_user.id,
+            bank_account_id=debt_data.bank_account_id,
+            wallet_id=debt_data.wallet_id
         )
         
-        user_id = payload.get("user_id")
-        if not user_id:
-            return None
+        db.add(payment)
+        db.flush()
         
-        user = db.query(User).filter(User.id == user_id).first()
-        return user
+        # If payment is via wallet, process wallet transaction
+        if debt_data.initial_payment_method == models.DebtPaymentMethod.WALLET.value and debt_data.wallet_id:
+            wallet_transaction = process_wallet_transaction(
+                db=db,
+                wallet_id=debt_data.wallet_id,
+                amount=debt_data.initial_payment_amount,
+                transaction_type="withdrawal",
+                description=f"Debt payment - {debt_number}",
+                reference_type="debt_payment",
+                reference_id=payment.id,
+                user_id=current_user.id
+            )
+            payment.wallet_transaction_id = wallet_transaction.id
         
-    except Exception:
-        return None
+        # Update debt paid amount
+        debt.paid_amount += debt_data.initial_payment_amount
+        debt.remaining_amount = debt.total_amount - debt.paid_amount
+        update_debt_status(debt)
+    
+    # Auto-approve if admin
+    if current_user.role == "admin":
+        debt.approved_by = current_user.id
+        debt.approved_at = datetime.now()
+        debt.approval_status = "approved"
+    
+    db.commit()
+    db.refresh(debt)
+    
+    return debt
 
 
-def get_current_active_user(
-    current_user: User = Depends(get_current_user),
-) -> User:
-    """Get current active user"""
-    if not current_user.active:
+@router.get("/", response_model=List[schemas.DebtResponse])
+async def get_debts(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    branch_id: Optional[int] = None,
+    status: Optional[models.DebtStatus] = None,
+    supplier_name: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """
+    Get all debts with filters
+    """
+    query = db.query(models.Debt)
+    
+    # Filter by branch
+    if branch_id:
+        query = query.filter(models.Debt.branch_id == branch_id)
+    elif current_user.role != "admin" and current_user.branch_id:
+        query = query.filter(models.Debt.branch_id == current_user.branch_id)
+    
+    # Filter by status
+    if status:
+        query = query.filter(models.Debt.status == status.value)
+    
+    # Filter by supplier name
+    if supplier_name:
+        query = query.filter(models.Debt.supplier_name.ilike(f"%{supplier_name}%"))
+    
+    # Filter by date range
+    if date_from:
+        query = query.filter(func.date(models.Debt.debt_date) >= date_from)
+    if date_to:
+        query = query.filter(func.date(models.Debt.debt_date) <= date_to)
+    
+    # Order by created_at descending
+    query = query.order_by(desc(models.Debt.created_at))
+    
+    # Pagination
+    debts = query.offset(skip).limit(limit).all()
+    
+    return debts
+
+
+@router.get("/{debt_id}", response_model=schemas.DebtResponse)
+async def get_debt(
+    debt_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """
+    Get a specific debt by ID
+    """
+    debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
+    
+    if not debt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Debt not found"
+        )
+    
+    # Check branch access
+    if current_user.role != "admin":
+        if current_user.branch_id and debt.branch_id != current_user.branch_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this debt"
+            )
+    
+    return debt
+
+
+@router.put("/{debt_id}", response_model=schemas.DebtResponse)
+async def update_debt(
+    debt_id: int,
+    debt_update: schemas.DebtUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_privileged)  # Use require_privileged
+):
+    """
+    Update a debt record
+    """
+    debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
+    
+    if not debt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Debt not found"
+        )
+    
+    # Check branch access
+    if current_user.role != "admin":
+        if current_user.branch_id and debt.branch_id != current_user.branch_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this debt"
+            )
+    
+    # Update fields
+    update_data = debt_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        if field == "status" and value:
+            # Don't allow changing to a status that doesn't make sense
+            if value == models.DebtStatus.SETTLED.value and debt.remaining_amount > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot mark debt as settled when there's still remaining amount"
+                )
+            setattr(debt, field, value)
+        else:
+            setattr(debt, field, value)
+    
+    db.commit()
+    db.refresh(debt)
+    
+    return debt
+
+
+@router.delete("/{debt_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_debt(
+    debt_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)  # Use require_admin
+):
+    """
+    Delete a debt (Admin only)
+    """
+    debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
+    
+    if not debt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Debt not found"
+        )
+    
+    # Check if debt has payments
+    if debt.payments:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user"
+            detail="Cannot delete debt with existing payments"
         )
-    return current_user
+    
+    db.delete(debt)
+    db.commit()
 
 
-# ==================== ROLE-BASED AUTHORIZATION DEPENDENCIES ====================
+# ==================== DEBT PAYMENT OPERATIONS ====================
 
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    """Dependency to require admin role"""
+@router.post("/{debt_id}/pay", response_model=schemas.DebtResponse)
+async def make_debt_payment(
+    debt_id: int,
+    payment_data: schemas.DebtSettleRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_privileged)  # Use require_privileged
+):
+    """
+    Make a payment towards a debt
+    """
+    debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
+    
+    if not debt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Debt not found"
+        )
+    
+    # Check branch access
     if current_user.role != "admin":
+        if current_user.branch_id and debt.branch_id != current_user.branch_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this debt"
+            )
+    
+    # Check if debt is already settled
+    if debt.status == models.DebtStatus.SETTLED.value:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin privileges required"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debt is already settled"
         )
-    return current_user
-
-
-def require_privileged(current_user: User = Depends(get_current_user)) -> User:
-    """Require privileged access (admin or privileged_sales)"""
-    if current_user.role not in ["admin", "privileged_sales"]:
+    
+    # Check payment amount
+    if payment_data.amount > debt.remaining_amount:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Privileged access required"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Payment amount exceeds remaining balance. Remaining: {debt.remaining_amount}"
         )
-    return current_user
+    
+    # Generate payment number
+    payment_number = generate_payment_number(db)
+    
+    # Create payment record
+    payment = models.DebtPayment(
+        debt_id=debt.id,
+        payment_number=payment_number,
+        amount=payment_data.amount,
+        payment_method=payment_data.payment_method.value,
+        payment_type=payment_data.payment_method.value,
+        reference_number=payment_data.reference_number,
+        notes=payment_data.notes,
+        recorded_by=current_user.id,
+        bank_account_id=payment_data.bank_account_id,
+        wallet_id=payment_data.wallet_id
+    )
+    
+    db.add(payment)
+    db.flush()
+    
+    # Process based on payment method
+    if payment_data.payment_method == models.DebtPaymentMethod.WALLET.value:
+        if not payment_data.wallet_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Wallet ID required for wallet payment"
+            )
+        
+        # Process wallet deduction
+        wallet_transaction = process_wallet_transaction(
+            db=db,
+            wallet_id=payment_data.wallet_id,
+            amount=payment_data.amount,
+            transaction_type="withdrawal",
+            description=f"Debt payment - {debt.debt_number}",
+            reference_type="debt_payment",
+            reference_id=payment.id,
+            user_id=current_user.id
+        )
+        payment.wallet_transaction_id = wallet_transaction.id
+    
+    elif payment_data.payment_method == models.DebtPaymentMethod.PRODUCT.value:
+        if not payment_data.product_items:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Product items required for product payment"
+            )
+        
+        # Process product payments
+        product_payments = process_product_payment(
+            db=db,
+            debt_payment=payment,
+            product_items=payment_data.product_items,
+            branch_id=debt.branch_id,
+            user_id=current_user.id
+        )
+        payment.payment_type = "product"
+    
+    elif payment_data.payment_method == models.DebtPaymentMethod.MIXED.value:
+        if not payment_data.product_items:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Product items required for mixed payment"
+            )
+        
+        # Process product payments
+        product_payments = process_product_payment(
+            db=db,
+            debt_payment=payment,
+            product_items=payment_data.product_items,
+            branch_id=debt.branch_id,
+            user_id=current_user.id
+        )
+        payment.payment_type = "mixed"
+        
+        # If there's a wallet component, process it
+        if payment_data.wallet_id:
+            wallet_transaction = process_wallet_transaction(
+                db=db,
+                wallet_id=payment_data.wallet_id,
+                amount=payment_data.amount,
+                transaction_type="withdrawal",
+                description=f"Debt payment (mixed) - {debt.debt_number}",
+                reference_type="debt_payment",
+                reference_id=payment.id,
+                user_id=current_user.id
+            )
+            payment.wallet_transaction_id = wallet_transaction.id
+    
+    # Update debt paid amount
+    debt.paid_amount += payment_data.amount
+    debt.remaining_amount = debt.total_amount - debt.paid_amount
+    update_debt_status(debt)
+    
+    db.commit()
+    db.refresh(debt)
+    
+    return debt
 
 
-def require_salesman(current_user: User = Depends(get_current_user)) -> User:
-    """Require salesman access (including privileged_sales)"""
-    if current_user.role not in ["admin", "salesman", "privileged_sales"]:
+# ==================== DEBT APPROVAL OPERATIONS ====================
+
+@router.post("/{debt_id}/approve", response_model=schemas.DebtResponse)
+async def approve_debt(
+    debt_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)  # Use require_admin
+):
+    """
+    Approve a debt (Admin only)
+    """
+    debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
+    
+    if not debt:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Sales access required"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Debt not found"
         )
-    return current_user
-
-
-def require_loan_creation_privilege(current_user: User = Depends(get_current_user)) -> User:
-    """Require loan creation privileges (admin or privileged_sales)"""
-    if current_user.role not in ["admin", "privileged_sales"]:
+    
+    if debt.approval_status == "approved":
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Loan creation requires privileged access"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debt is already approved"
         )
-    return current_user
+    
+    debt.approval_status = "approved"
+    debt.approved_by = current_user.id
+    debt.approved_at = datetime.now()
+    
+    db.commit()
+    db.refresh(debt)
+    
+    return debt
 
 
-def require_loan_approval_privilege(current_user: User = Depends(get_current_user)) -> User:
-    """Require loan approval privileges (admin only)"""
+@router.post("/{debt_id}/reject", response_model=schemas.DebtResponse)
+async def reject_debt(
+    debt_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)  # Use require_admin
+):
+    """
+    Reject a debt (Admin only)
+    """
+    debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
+    
+    if not debt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Debt not found"
+        )
+    
+    if debt.approval_status == "approved":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot reject an approved debt"
+        )
+    
+    debt.approval_status = "rejected"
+    debt.approved_by = current_user.id
+    debt.approved_at = datetime.now()
+    debt.status = models.DebtStatus.CANCELLED.value
+    
+    db.commit()
+    db.refresh(debt)
+    
+    return debt
+
+
+# ==================== DEBT REPORTS AND SUMMARIES ====================
+
+@router.get("/summary/", response_model=schemas.DebtSummaryResponse)
+async def get_debt_summary(
+    branch_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """
+    Get debt summary
+    """
+    query = db.query(models.Debt)
+    
+    # Filter by branch
+    if branch_id:
+        query = query.filter(models.Debt.branch_id == branch_id)
+    elif current_user.role != "admin" and current_user.branch_id:
+        query = query.filter(models.Debt.branch_id == current_user.branch_id)
+    
+    # Calculate summary
+    total_debts = query.count()
+    total_debt_amount = query.filter(
+        models.Debt.status != models.DebtStatus.CANCELLED.value
+    ).with_entities(func.sum(models.Debt.total_amount)).scalar() or 0
+    
+    total_repayments = query.filter(
+        models.Debt.status != models.DebtStatus.CANCELLED.value
+    ).with_entities(func.sum(models.Debt.paid_amount)).scalar() or 0
+    
+    total_outstanding = query.filter(
+        models.Debt.status != models.DebtStatus.CANCELLED.value
+    ).with_entities(func.sum(models.Debt.remaining_amount)).scalar() or 0
+    
+    active_debts = query.filter(
+        models.Debt.status == models.DebtStatus.ACTIVE.value
+    ).count()
+    
+    overdue_debts = query.filter(
+        models.Debt.status == models.DebtStatus.OVERDUE.value
+    ).count()
+    
+    summary = schemas.DebtSummaryResponse(
+        summary_date=date.today(),
+        branch_id=branch_id or current_user.branch_id or 0,
+        total_debts_issued=total_debts,
+        total_debt_amount=Decimal(str(total_debt_amount)),
+        total_repayments=Decimal(str(total_repayments)),
+        total_outstanding=Decimal(str(total_outstanding)),
+        active_debts_count=active_debts,
+        overdue_debts_count=overdue_debts
+    )
+    
+    return summary
+
+
+@router.get("/report/", response_model=schemas.DebtReport)
+async def get_debt_report(
+    date_from: date = Query(..., description="Start date"),
+    date_to: date = Query(..., description="End date"),
+    branch_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """
+    Get comprehensive debt report
+    """
+    if date_from > date_to:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="date_from must be before date_to"
+        )
+    
+    query = db.query(models.Debt).filter(
+        func.date(models.Debt.debt_date) >= date_from,
+        func.date(models.Debt.debt_date) <= date_to
+    )
+    
+    # Filter by branch
+    if branch_id:
+        query = query.filter(models.Debt.branch_id == branch_id)
+    elif current_user.role != "admin" and current_user.branch_id:
+        query = query.filter(models.Debt.branch_id == current_user.branch_id)
+    
+    debts = query.all()
+    
+    # Calculate totals
+    total_debts = len(debts)
+    total_debt_value = sum(d.total_amount for d in debts)
+    total_repayments = sum(d.paid_amount for d in debts)
+    total_outstanding = sum(d.remaining_amount for d in debts)
+    
+    # Calculate average
+    average_debt_size = total_debt_value / total_debts if total_debts > 0 else 0
+    
+    # Calculate repayment rate
+    repayment_rate = (total_repayments / total_debt_value * 100) if total_debt_value > 0 else 0
+    
+    # Group by status
+    debts_by_status = {}
+    for debt in debts:
+        status = debt.status
+        debts_by_status[status] = debts_by_status.get(status, 0) + 1
+    
+    # Daily breakdown
+    daily_breakdown = []
+    current_date = date_from
+    while current_date <= date_to:
+        day_debts = [d for d in debts if d.debt_date.date() == current_date]
+        daily_breakdown.append({
+            "date": current_date.isoformat(),
+            "count": len(day_debts),
+            "total_amount": sum(d.total_amount for d in day_debts),
+            "repayments": sum(d.paid_amount for d in day_debts)
+        })
+        current_date += timedelta(days=1)
+    
+    # Supplier breakdown
+    supplier_breakdown = []
+    suppliers = {}
+    for debt in debts:
+        if debt.supplier_name not in suppliers:
+            suppliers[debt.supplier_name] = {
+                "supplier": debt.supplier_name,
+                "total_debts": 0,
+                "total_amount": 0,
+                "repayments": 0,
+                "outstanding": 0
+            }
+        suppliers[debt.supplier_name]["total_debts"] += 1
+        suppliers[debt.supplier_name]["total_amount"] += float(debt.total_amount)
+        suppliers[debt.supplier_name]["repayments"] += float(debt.paid_amount)
+        suppliers[debt.supplier_name]["outstanding"] += float(debt.remaining_amount)
+    
+    supplier_breakdown = list(suppliers.values())
+    
+    # Payment method breakdown
+    payment_method_breakdown = {}
+    for debt in debts:
+        for payment in debt.payments:
+            method = payment.payment_method
+            payment_method_breakdown[method] = payment_method_breakdown.get(method, 0) + float(payment.amount)
+    
+    report = schemas.DebtReport(
+        date_range=schemas.DateRange(from_date=date_from, to_date=date_to),
+        total_debts=total_debts,
+        total_debt_value=Decimal(str(total_debt_value)),
+        total_repayments=Decimal(str(total_repayments)),
+        total_outstanding=Decimal(str(total_outstanding)),
+        average_debt_size=Decimal(str(average_debt_size)),
+        repayment_rate=repayment_rate,
+        debts_by_status=debts_by_status,
+        daily_breakdown=daily_breakdown,
+        supplier_breakdown=supplier_breakdown,
+        payment_method_breakdown=payment_method_breakdown
+    )
+    
+    return report
+
+
+@router.get("/by-supplier/{supplier_name}", response_model=List[schemas.DebtResponse])
+async def get_debts_by_supplier(
+    supplier_name: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """
+    Get all debts for a specific supplier
+    """
+    query = db.query(models.Debt).filter(
+        models.Debt.supplier_name.ilike(f"%{supplier_name}%")
+    )
+    
+    if current_user.role != "admin" and current_user.branch_id:
+        query = query.filter(models.Debt.branch_id == current_user.branch_id)
+    
+    debts = query.order_by(desc(models.Debt.created_at)).all()
+    
+    return debts
+
+
+@router.get("/{debt_id}/payments", response_model=List[schemas.DebtPaymentResponse])
+async def get_debt_payments(
+    debt_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
+    """
+    Get all payments for a specific debt
+    """
+    debt = db.query(models.Debt).filter(models.Debt.id == debt_id).first()
+    
+    if not debt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Debt not found"
+        )
+    
+    # Check branch access
     if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Loan approval requires administrator access"
-        )
-    return current_user
+        if current_user.branch_id and debt.branch_id != current_user.branch_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this debt"
+            )
+    
+    payments = db.query(models.DebtPayment).filter(
+        models.DebtPayment.debt_id == debt_id
+    ).order_by(desc(models.DebtPayment.payment_date)).all()
+    
+    return payments
 
 
-def require_refund_privilege(current_user: User = Depends(get_current_user)) -> User:
-    """Require refund processing privileges (admin or privileged_sales)"""
-    if current_user.role not in ["admin", "privileged_sales"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Refund processing requires privileged access"
-        )
-    return current_user
+# ==================== DEBT PAYMENT DETAILS ====================
 
-
-def require_report_damaged_goods(current_user: User = Depends(get_current_user)) -> User:
-    """Allow any active user to report damaged goods"""
-    if not current_user.active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive user cannot report damaged goods"
-        )
-    if current_user.role not in ["admin", "privileged_sales", "salesman"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have permission to report damaged goods"
-        )
-    return current_user
-
-
-def require_approve_damaged_goods(current_user: User = Depends(get_current_user)) -> User:
-    """Require privileged access to approve damaged goods"""
-    if current_user.role not in ["admin", "privileged_sales"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Approving damaged goods requires privileged access"
-        )
-    return current_user
-
-
-def require_process_damaged_goods(current_user: User = Depends(get_current_user)) -> User:
-    """Require privileged access to process damaged goods"""
-    if current_user.role not in ["admin", "privileged_sales"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Processing damaged goods requires privileged access"
-        )
-    return current_user
-
-
-def require_purchase_management(current_user: User = Depends(get_current_user)) -> User:
-    """Require privileged access for purchase management"""
-    if current_user.role not in ["admin", "privileged_sales"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Purchase management requires privileged access"
-        )
-    return current_user
-
-
-def require_create_purchase_order(current_user: User = Depends(get_current_user)) -> User:
-    """Require privileged access to create purchase orders"""
-    if current_user.role not in ["admin", "privileged_sales"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Creating purchase orders requires privileged access"
-        )
-    return current_user
-
-
-def require_receive_purchase_order(current_user: User = Depends(get_current_user)) -> User:
-    """Require privileged access to receive purchase orders"""
-    if current_user.role not in ["admin", "privileged_sales"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Receiving purchase orders requires privileged access"
-        )
-    return current_user
-
-
-def require_manage_suppliers(current_user: User = Depends(get_current_user)) -> User:
-    """Require privileged access to manage suppliers"""
-    if current_user.role not in ["admin", "privileged_sales"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Supplier management requires privileged access"
-        )
-    return current_user
-
-
-# ==================== ADDITIONAL HELPER FUNCTIONS ====================
-
-def get_current_branch_id(
-    current_user: User = Depends(get_current_user)
-) -> int:
+@router.get("/payment/{payment_id}", response_model=schemas.DebtPaymentResponse)
+async def get_payment_details(
+    payment_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
     """
-    Get the current user's branch ID.
-    Useful for filtering data by branch.
+    Get details of a specific payment
     """
-    if current_user.is_admin():
-        return 0
-    return current_user.branch_id or 0
+    payment = db.query(models.DebtPayment).filter(
+        models.DebtPayment.id == payment_id
+    ).first()
+    
+    if not payment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Payment not found"
+        )
+    
+    # Check branch access
+    debt = db.query(models.Debt).filter(models.Debt.id == payment.debt_id).first()
+    if current_user.role != "admin":
+        if current_user.branch_id and debt.branch_id != current_user.branch_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this payment"
+            )
+    
+    return payment
 
 
-def require_branch_access(
-    branch_id: int,
-    current_user: User = Depends(get_current_user)
-) -> bool:
+# ==================== DASHBOARD STATISTICS ====================
+
+@router.get("/dashboard/stats/")
+async def get_debt_dashboard_stats(
+    branch_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+):
     """
-    Check if current user has access to the specified branch.
-    Admin has access to all branches.
+    Get dashboard statistics for debts
     """
-    if current_user.is_admin():
-        return True
-    return current_user.branch_id == branch_id
+    query = db.query(models.Debt)
+    
+    # Filter by branch
+    if branch_id:
+        query = query.filter(models.Debt.branch_id == branch_id)
+    elif current_user.role != "admin" and current_user.branch_id:
+        query = query.filter(models.Debt.branch_id == current_user.branch_id)
+    
+    # Total debt amount
+    total_debt = query.filter(
+        models.Debt.status != models.DebtStatus.CANCELLED.value
+    ).with_entities(func.sum(models.Debt.total_amount)).scalar() or 0
+    
+    # Total paid
+    total_paid = query.filter(
+        models.Debt.status != models.DebtStatus.CANCELLED.value
+    ).with_entities(func.sum(models.Debt.paid_amount)).scalar() or 0
+    
+    # Total outstanding
+    total_outstanding = query.filter(
+        models.Debt.status != models.DebtStatus.CANCELLED.value
+    ).with_entities(func.sum(models.Debt.remaining_amount)).scalar() or 0
+    
+    # Counts by status
+    status_counts = {}
+    for status in models.DebtStatus:
+        count = query.filter(models.Debt.status == status.value).count()
+        status_counts[status.value] = count
+    
+    # Recent debts (last 5)
+    recent_debts = query.order_by(desc(models.Debt.created_at)).limit(5).all()
+    
+    return {
+        "total_debt": float(total_debt),
+        "total_paid": float(total_paid),
+        "total_outstanding": float(total_outstanding),
+        "status_counts": status_counts,
+        "recent_debts": recent_debts,
+        "total_debts_count": query.count()
+    }
+
+
+print("✅ Debt router endpoints registered successfully!")
