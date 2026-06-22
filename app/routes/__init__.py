@@ -16,9 +16,7 @@ from .vat import router as vat_router  # VAT tracking router
 from .wallet import router as wallet_router  # Wallet management router
 from .damaged_goods_router import router as damaged_goods_router  # Damaged goods router
 
-# ADD THIS LINE - Import the debt router
-# Note: Make sure the file exists at app/routers/debts.py
-from app.routers.debts import router as debt_router  # Debt tracking router
+from .debts import router as debt_router  # Debt tracking router
 
 
 # Export all routers
