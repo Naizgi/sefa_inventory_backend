@@ -844,6 +844,7 @@ async def get_debt_dashboard_stats(
         "recent_debts": recent_debts,
         "total_debts_count": query.count()
     }
+    
 
 
 print("✅ Debt router endpoints registered successfully!")
