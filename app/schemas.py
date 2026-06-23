@@ -624,12 +624,19 @@ class DebtBase(BaseModel):
     supplier_name: str = Field(min_length=2, max_length=255)
     supplier_phone: Optional[str] = None
     supplier_email: Optional[EmailStr] = None
-    amount: Decimal = Field(gt=0, description="Total debt amount")
+    # Changed from 'amount' to 'total_amount' to match model
+    total_amount: Decimal = Field(gt=0, description="Total debt amount")
     description: Optional[str] = Field(None, description="Description of what the debt is for")
     notes: Optional[str] = None
 
-class DebtCreate(DebtBase):
+class DebtCreate(BaseModel):
     branch_id: int
+    supplier_name: str = Field(min_length=2, max_length=255)
+    supplier_phone: Optional[str] = None
+    supplier_email: Optional[EmailStr] = None
+    total_amount: Decimal = Field(gt=0, description="Total debt amount")
+    description: Optional[str] = None
+    notes: Optional[str] = None
     # Optional fields for initial payment
     initial_payment_amount: Decimal = Field(default=0, ge=0)
     initial_payment_method: Optional[DebtPaymentMethod] = None
@@ -676,17 +683,26 @@ class DebtPaymentResponse(DebtPaymentBase):
     
     model_config = ConfigDict(from_attributes=True)
 
-class DebtResponse(DebtBase):
+# FIXED: Updated DebtResponse to match model structure
+class DebtResponse(BaseModel):
     id: int
     debt_number: str
     branch_id: int
+    supplier_name: str
+    supplier_phone: Optional[str] = None
+    supplier_email: Optional[EmailStr] = None
     debt_date: datetime
+    total_amount: Decimal = Field(..., description="Total debt amount")  # Changed from 'amount'
     paid_amount: Decimal = Field(default=0)
     remaining_amount: Decimal = Field(default=0)
     status: DebtStatus
+    description: Optional[str] = None
+    notes: Optional[str] = None
     payments: List[DebtPaymentResponse] = []
-    created_by: str
-    approved_by: Optional[str] = None
+    created_by: int  # Changed from str to int
+    created_by_name: Optional[str] = None  # Added for user display name
+    approved_by: Optional[int] = None  # Changed from str to Optional[int]
+    approved_by_name: Optional[str] = None  # Added for approver display name
     approved_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -1014,7 +1030,8 @@ class SystemLogResponse(SystemLogBase):
     model_config = ConfigDict(from_attributes=True)
 
 
-# Settings update request modelsclass GeneralSettingsUpdate(BaseModel):
+# Settings update request models
+class GeneralSettingsUpdate(BaseModel):
     system_name: str = Field(default="Inventory System")
     timezone: str = Field(default="Africa/Addis_Ababa")
     date_format: str = Field(default="YYYY-MM-DD")
