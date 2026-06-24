@@ -26,6 +26,27 @@ def generate_loan_number():
 def generate_payment_number():
     return f"PMT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
+# ==================== HELPER FUNCTIONS ====================
+def get_wallet_from_bank_account(db: Session, bank_account_id: int, branch_id: int) -> Optional[Wallet]:
+    """Get the wallet associated with a bank account - same logic as sales.py"""
+    bank_account = db.query(BankAccount).filter(
+        BankAccount.id == bank_account_id,
+        BankAccount.branch_id == branch_id,
+        BankAccount.is_active == True
+    ).first()
+    
+    if not bank_account:
+        return None
+    
+    # Find wallet linked to this bank account
+    wallet = db.query(Wallet).filter(
+        Wallet.bank_account_id == bank_account_id,
+        Wallet.branch_id == branch_id,
+        Wallet.is_active == True
+    ).first()
+    
+    return wallet
+
 # POST - Create loan
 @router.post("", response_model=LoanResponse)
 @router.post("/", response_model=LoanResponse)
@@ -541,6 +562,8 @@ def delete_loan(
     return None
 
 
+# ==================== PAYMENT OPERATIONS (UPDATED WITH SAME LOGIC AS SALES) ====================
+
 # POST - Add payment (Privileged users only)
 @router.post("/{loan_id}/payments", response_model=LoanPaymentResponse)
 def add_loan_payment(
@@ -562,6 +585,7 @@ def add_loan_payment(
         raise HTTPException(status_code=400, detail="Payment amount exceeds remaining balance")
     
     # Handle wallet payment - deposit to wallet first
+    wallet = None
     if payment_data.payment_method == 'wallet':
         # Check if bank_account_id is provided
         if not hasattr(payment_data, 'bank_account_id') or not payment_data.bank_account_id:
@@ -577,23 +601,41 @@ def add_loan_payment(
         if not bank_account:
             raise HTTPException(status_code=404, detail="Bank account not found or inactive")
         
-        # Get or create wallet for the branch - using the wallet router function
-        wallet = get_or_create_wallet(db, loan.branch_id, "regular")
+        # ✅ Use the same wallet logic as sales.py
+        wallet = get_wallet_from_bank_account(db, bank_account.id, loan.branch_id)
         
-        # Process the deposit using the wallet router function
-        transaction = process_wallet_transaction(
-            db=db,
-            wallet_id=wallet.id,
-            transaction_type=WalletTransactionType.DEPOSIT.value,
-            amount=payment_data.amount,
-            description=f"Loan payment from {loan.customer_name} - {loan.loan_number}",
-            user_id=current_user.id,
-            transaction_method="cash",
-            reference_type="loan_payment",
-            reference_id=loan.id,
-            bank_reference=str(payment_data.bank_account_id) if payment_data.bank_account_id else None
-        )
-        print(f"✅ Wallet deposited: {transaction.transaction_number} - Amount: {payment_data.amount} to wallet '{wallet.wallet_name}'")
+        if wallet:
+            print(f"✅ Found wallet linked to bank account: '{wallet.wallet_name}' (ID: {wallet.id})")
+        else:
+            # If no linked wallet, create one based on account category
+            if bank_account.account_category == "vat":
+                wallet = get_or_create_wallet(db, loan.branch_id, "vat")
+                print(f"✅ Creating/using VAT wallet for branch: '{wallet.wallet_name}'")
+            else:
+                wallet = get_or_create_wallet(db, loan.branch_id, "regular")
+                print(f"✅ Creating/using regular wallet for branch: '{wallet.wallet_name}'")
+            
+            # Link the wallet to the bank account for future use
+            if wallet and not wallet.bank_account_id:
+                wallet.bank_account_id = bank_account.id
+                db.flush()
+                print(f"✅ Linked wallet '{wallet.wallet_name}' to bank account {bank_account.id}")
+        
+        if wallet:
+            # Process the deposit using the wallet router function
+            transaction = process_wallet_transaction(
+                db=db,
+                wallet_id=wallet.id,
+                transaction_type=WalletTransactionType.DEPOSIT.value,
+                amount=payment_data.amount,
+                description=f"Loan payment from {loan.customer_name} - {loan.loan_number}",
+                user_id=current_user.id,
+                transaction_method="bank_transfer",
+                reference_type="loan_payment",
+                reference_id=loan.id,
+                bank_reference=str(payment_data.bank_account_id) if payment_data.bank_account_id else None
+            )
+            print(f"✅ Wallet deposited: {transaction.transaction_number} - Amount: {payment_data.amount} to wallet '{wallet.wallet_name}' (ID: {wallet.id})")
     
     # Create payment record
     payment = LoanPayment(
@@ -638,7 +680,9 @@ def add_loan_payment(
         "recorded_by": recorder_name,
         "sale_id": payment.sale_id,
         "created_at": payment.created_at,
-        "bank_account_id": payment.bank_account_id
+        "bank_account_id": payment.bank_account_id,
+        "wallet_name": wallet.wallet_name if wallet else None,
+        "wallet_id": wallet.id if wallet else None
     }
 
 
@@ -663,6 +707,7 @@ def settle_loan(
         raise HTTPException(status_code=400, detail=f"Amount must be at least {loan.remaining_amount} to settle")
     
     # Handle wallet payment - deposit to wallet first
+    wallet = None
     if settle_data.payment_method == 'wallet':
         # Check if bank_account_id is provided
         if not hasattr(settle_data, 'bank_account_id') or not settle_data.bank_account_id:
@@ -678,23 +723,41 @@ def settle_loan(
         if not bank_account:
             raise HTTPException(status_code=404, detail="Bank account not found or inactive")
         
-        # Get or create wallet for the branch - using the wallet router function
-        wallet = get_or_create_wallet(db, loan.branch_id, "regular")
+        # ✅ Use the same wallet logic as sales.py
+        wallet = get_wallet_from_bank_account(db, bank_account.id, loan.branch_id)
         
-        # Process the deposit using the wallet router function
-        transaction = process_wallet_transaction(
-            db=db,
-            wallet_id=wallet.id,
-            transaction_type=WalletTransactionType.DEPOSIT.value,
-            amount=loan.remaining_amount,
-            description=f"Loan settlement from {loan.customer_name} - {loan.loan_number}",
-            user_id=current_user.id,
-            transaction_method="cash",
-            reference_type="loan",
-            reference_id=loan.id,
-            bank_reference=str(settle_data.bank_account_id) if settle_data.bank_account_id else None
-        )
-        print(f"✅ Wallet deposited for settlement: {transaction.transaction_number} - Amount: {loan.remaining_amount} to wallet '{wallet.wallet_name}'")
+        if wallet:
+            print(f"✅ Found wallet linked to bank account: '{wallet.wallet_name}' (ID: {wallet.id})")
+        else:
+            # If no linked wallet, create one based on account category
+            if bank_account.account_category == "vat":
+                wallet = get_or_create_wallet(db, loan.branch_id, "vat")
+                print(f"✅ Creating/using VAT wallet for branch: '{wallet.wallet_name}'")
+            else:
+                wallet = get_or_create_wallet(db, loan.branch_id, "regular")
+                print(f"✅ Creating/using regular wallet for branch: '{wallet.wallet_name}'")
+            
+            # Link the wallet to the bank account for future use
+            if wallet and not wallet.bank_account_id:
+                wallet.bank_account_id = bank_account.id
+                db.flush()
+                print(f"✅ Linked wallet '{wallet.wallet_name}' to bank account {bank_account.id}")
+        
+        if wallet:
+            # Process the deposit using the wallet router function
+            transaction = process_wallet_transaction(
+                db=db,
+                wallet_id=wallet.id,
+                transaction_type=WalletTransactionType.DEPOSIT.value,
+                amount=loan.remaining_amount,
+                description=f"Loan settlement from {loan.customer_name} - {loan.loan_number}",
+                user_id=current_user.id,
+                transaction_method="bank_transfer",
+                reference_type="loan",
+                reference_id=loan.id,
+                bank_reference=str(settle_data.bank_account_id) if settle_data.bank_account_id else None
+            )
+            print(f"✅ Wallet deposited for settlement: {transaction.transaction_number} - Amount: {loan.remaining_amount} to wallet '{wallet.wallet_name}' (ID: {wallet.id})")
     
     # Create payment for remaining amount
     payment = LoanPayment(
@@ -738,7 +801,9 @@ def settle_loan(
         "payment_method": payment.payment_method,
         "reference_number": payment.reference_number,
         "bank_account_id": payment.bank_account_id,
-        "bank_account_details": bank_account_details
+        "bank_account_details": bank_account_details,
+        "wallet_name": wallet.wallet_name if wallet else None,
+        "wallet_id": wallet.id if wallet else None
     }
 
 
