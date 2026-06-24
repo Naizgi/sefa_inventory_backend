@@ -1,6 +1,7 @@
 # app/routes/sales.py
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -1214,116 +1215,179 @@ def get_sales(
 ):
     """Get sales with filters including payment method and status"""
     
-    query = db.query(Sale)
-    
-    if current_user.role == "salesman":
-        if branch_id and branch_id != current_user.branch_id:
-            raise HTTPException(
-                status_code=403,
-                detail="Not authorized to view sales from other branches"
+    try:
+        print(f"🔍 GET_SALES called - User: {current_user.id}, Role: {current_user.role}")
+        
+        query = db.query(Sale)
+        
+        # Apply branch filter
+        if current_user.role == "salesman":
+            if branch_id and branch_id != current_user.branch_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Not authorized to view sales from other branches"
+                )
+            query = query.filter(Sale.branch_id == current_user.branch_id)
+        elif branch_id:
+            query = query.filter(Sale.branch_id == branch_id)
+        
+        # Apply date filters
+        if start_date:
+            query = query.filter(Sale.created_at >= start_date)
+        if end_date:
+            query = query.filter(Sale.created_at <= end_date)
+        
+        # Apply other filters
+        if payment_method:
+            query = query.filter(Sale.payment_method == payment_method)
+        if status:
+            query = query.filter(Sale.status == status)
+        if search:
+            query = query.filter(
+                (Sale.invoice_number.ilike(f"%{search}%")) |
+                (Sale.customer_name.ilike(f"%{search}%"))
             )
-        query = query.filter(Sale.branch_id == current_user.branch_id)
-    elif branch_id:
-        query = query.filter(Sale.branch_id == branch_id)
-    
-    if start_date:
-        query = query.filter(Sale.created_at >= start_date)
-    if end_date:
-        query = query.filter(Sale.created_at <= end_date)
-    if payment_method:
-        query = query.filter(Sale.payment_method == payment_method)
-    if status:
-        query = query.filter(Sale.status == status)
-    if search:
-        query = query.filter(
-            (Sale.invoice_number.ilike(f"%{search}%")) |
-            (Sale.customer_name.ilike(f"%{search}%"))
-        )
-    
-    sales = query.order_by(Sale.created_at.desc()).limit(limit).all()
-    
-    result = []
-    for sale in sales:
-        items = db.query(SaleItem).filter(SaleItem.sale_id == sale.id).all()
         
-        # Get bank account details if available
-        bank_account_details = None
-        if sale.bank_account_id:
-            bank_account = db.query(BankAccount).filter(BankAccount.id == sale.bank_account_id).first()
-            if bank_account:
-                bank_account_details = BankAccountResponse(
-                    id=bank_account.id,
-                    branch_id=bank_account.branch_id,
-                    bank_name=bank_account.bank_name,
-                    branch_name=bank_account.branch_name,
-                    account_number=bank_account.account_number,
-                    account_name=bank_account.account_name,
-                    account_type=bank_account.account_type,
-                    iban=bank_account.iban,
-                    swift_code=bank_account.swift_code,
-                    currency=bank_account.currency,
-                    current_balance=float(bank_account.current_balance),
-                    is_active=bank_account.is_active,
-                    is_primary=bank_account.is_primary,
-                    last_reconciled_at=bank_account.last_reconciled_at,
-                    last_reconciled_balance=float(bank_account.last_reconciled_balance) if bank_account.last_reconciled_balance else None,
-                    notes=bank_account.notes,
-                    created_by=bank_account.created_by,
-                    created_at=bank_account.created_at,
-                    updated_at=bank_account.updated_at
-                )
+        # Execute query
+        sales = query.order_by(Sale.created_at.desc()).limit(limit).all()
+        print(f"✅ Found {len(sales)} sales")
         
-        result.append(SaleResponse(
-            id=sale.id,
-            invoice_number=sale.invoice_number,
-            branch_id=sale.branch_id,
-            branch_name=sale.branch.name if sale.branch else None,
-            user_id=sale.user_id,
-            user_name=sale.user.name if sale.user else None,
-            customer_name=sale.customer_name,
-            customer_phone=sale.customer_phone,
-            customer_email=sale.customer_email,
-            subtotal=float(sale.subtotal),
-            tax_amount=float(sale.tax_amount),
-            tax_rate=float(sale.tax_rate),
-            discount_amount=float(sale.discount_amount),
-            discount_type=sale.discount_type,
-            shipping_cost=float(sale.shipping_cost),
-            labour_cost=float(sale.labour_cost),
-            other_cost=float(sale.other_cost),
-            other_cost_description=sale.other_cost_description,
-            total_amount=float(sale.total_amount),
-            total_cost=float(sale.total_cost),
-            gross_profit=float(sale.gross_profit),
-            profit_margin=float(sale.profit_margin),
-            payment_method=sale.payment_method,
-            bank_account_id=sale.bank_account_id,
-            bank_account_details=bank_account_details,
-            transaction_reference=sale.transaction_reference,
-            status=sale.status,
-            refund_amount=float(sale.refund_amount),
-            refund_status=sale.refund_status,
-            created_at=sale.created_at,
-            updated_at=sale.updated_at,
-            notes=sale.notes,
-            items=[
-                SaleItemResponse(
-                    id=item.id,
-                    sale_id=item.sale_id,
-                    product_id=item.product_id,
-                    product_name=item.product.name if item.product else None,
-                    product_sku=item.product.sku if item.product else None,
-                    quantity=float(item.quantity),
-                    unit_price=float(item.unit_price),
-                    discount_amount=float(item.discount_amount),
-                    line_total=float(item.line_total)
+        result = []
+        for sale in sales:
+            try:
+                # Get sale items
+                items = db.query(SaleItem).filter(SaleItem.sale_id == sale.id).all()
+                
+                # Get bank account details if available
+                bank_account_details = None
+                if sale.bank_account_id:
+                    try:
+                        bank_account = db.query(BankAccount).filter(BankAccount.id == sale.bank_account_id).first()
+                        if bank_account:
+                            bank_account_details = BankAccountResponse(
+                                id=bank_account.id,
+                                branch_id=bank_account.branch_id,
+                                bank_name=bank_account.bank_name,
+                                branch_name=bank_account.branch_name,
+                                account_number=bank_account.account_number,
+                                account_name=bank_account.account_name,
+                                account_type=bank_account.account_type,
+                                iban=bank_account.iban,
+                                swift_code=bank_account.swift_code,
+                                currency=bank_account.currency,
+                                current_balance=float(bank_account.current_balance) if bank_account.current_balance else 0,
+                                is_active=bank_account.is_active,
+                                is_primary=bank_account.is_primary,
+                                last_reconciled_at=bank_account.last_reconciled_at,
+                                last_reconciled_balance=float(bank_account.last_reconciled_balance) if bank_account.last_reconciled_balance else None,
+                                notes=bank_account.notes,
+                                created_by=bank_account.created_by,
+                                created_at=bank_account.created_at,
+                                updated_at=bank_account.updated_at
+                            )
+                    except Exception as bank_error:
+                        print(f"⚠️ Bank account error for sale {sale.id}: {bank_error}")
+                        bank_account_details = None
+                
+                # Calculate refund amount safely
+                refund_amount = float(sale.refund_amount) if sale.refund_amount else 0
+                
+                # If refund_amount is 0 but status is partially_refunded, try to get it from refunds
+                if refund_amount == 0 and sale.status in ["partially_refunded", "refunded"]:
+                    try:
+                        # Try to get refunds directly
+                        refunds = db.query(Refund).filter(
+                            Refund.original_sale_id == sale.id,
+                            Refund.status == "completed"
+                        ).all()
+                        
+                        if refunds:
+                            total_refunded = 0
+                            for refund in refunds:
+                                if refund.refund_amount:
+                                    total_refunded += float(refund.refund_amount)
+                            refund_amount = total_refunded
+                            
+                            # Update the sale with correct refund amount if different
+                            if refund_amount != float(sale.refund_amount or 0):
+                                sale.refund_amount = Decimal(str(refund_amount))
+                                db.commit()
+                                print(f"✅ Updated refund_amount for sale {sale.id} to {refund_amount}")
+                    except Exception as refund_error:
+                        print(f"⚠️ Error getting refunds for sale {sale.id}: {refund_error}")
+                
+                # Determine refund status
+                refund_status = sale.refund_status or "none"
+                if sale.status == "partially_refunded" and refund_status == "none":
+                    refund_status = "partially_refunded"
+                elif sale.status == "refunded" and refund_status == "none":
+                    refund_status = "completed"
+                
+                # Build the response
+                sale_response = SaleResponse(
+                    id=sale.id,
+                    invoice_number=sale.invoice_number or "",
+                    branch_id=sale.branch_id,
+                    branch_name=sale.branch.name if sale.branch else None,
+                    user_id=sale.user_id,
+                    user_name=sale.user.name if sale.user else None,
+                    customer_name=sale.customer_name,
+                    customer_phone=sale.customer_phone,
+                    customer_email=sale.customer_email,
+                    subtotal=float(sale.subtotal) if sale.subtotal else 0,
+                    tax_amount=float(sale.tax_amount) if sale.tax_amount else 0,
+                    tax_rate=float(sale.tax_rate) if sale.tax_rate else 0,
+                    discount_amount=float(sale.discount_amount) if sale.discount_amount else 0,
+                    discount_type=sale.discount_type,
+                    shipping_cost=float(sale.shipping_cost) if sale.shipping_cost else 0,
+                    labour_cost=float(sale.labour_cost) if sale.labour_cost else 0,
+                    other_cost=float(sale.other_cost) if sale.other_cost else 0,
+                    other_cost_description=sale.other_cost_description,
+                    total_amount=float(sale.total_amount) if sale.total_amount else 0,
+                    total_cost=float(sale.total_cost) if sale.total_cost else 0,
+                    gross_profit=float(sale.gross_profit) if sale.gross_profit else 0,
+                    profit_margin=float(sale.profit_margin) if sale.profit_margin else 0,
+                    payment_method=sale.payment_method,
+                    bank_account_id=sale.bank_account_id,
+                    bank_account_details=bank_account_details,
+                    transaction_reference=sale.transaction_reference,
+                    status=sale.status or "completed",
+                    refund_amount=float(refund_amount),
+                    refund_status=refund_status,
+                    created_at=sale.created_at,
+                    updated_at=sale.updated_at,
+                    notes=sale.notes,
+                    items=[
+                        SaleItemResponse(
+                            id=item.id,
+                            sale_id=item.sale_id,
+                            product_id=item.product_id,
+                            product_name=item.product.name if item.product else None,
+                            product_sku=item.product.sku if item.product else None,
+                            quantity=float(item.quantity) if item.quantity else 0,
+                            unit_price=float(item.unit_price) if item.unit_price else 0,
+                            discount_amount=float(item.discount_amount) if item.discount_amount else 0,
+                            line_total=float(item.line_total) if item.line_total else 0
+                        )
+                        for item in items
+                    ]
                 )
-                for item in items
-            ]
-        ))
-    
-    return result
-
+                result.append(sale_response)
+                
+            except Exception as sale_error:
+                print(f"❌ Error processing sale {sale.id}: {sale_error}")
+                traceback.print_exc()
+                # Skip this sale and continue with others
+                continue
+        
+        print(f"✅ Returning {len(result)} sales successfully")
+        return result
+        
+    except Exception as e:
+        print(f"❌ CRITICAL Error in get_sales: {e}")
+        traceback.print_exc()
+        # Return empty list instead of failing
+        return []
 
 @router.get("/{sale_id}", response_model=SaleResponse)
 def get_sale(
