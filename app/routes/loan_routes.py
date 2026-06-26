@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import Optional, List
 from datetime import datetime, date, timedelta
 from decimal import Decimal
@@ -8,7 +9,7 @@ import uuid
 import logging
 
 from app.database import get_db
-from app.models import User, Loan, LoanPayment, LoanItem, Product, Stock, StockMovement, Wallet, WalletTransaction, BankAccount
+from app.models import User, Loan, LoanPayment, LoanItem, Product, Stock, StockMovement, Wallet, WalletTransaction, BankAccount, Branch
 from app.schemas import (
     LoanCreate, LoanResponse, LoanUpdate, LoanPaymentCreate,
     LoanPaymentResponse, LoanSettleRequest
@@ -16,11 +17,9 @@ from app.schemas import (
 from app.utils.dependencies import get_current_user, require_admin
 from app.utils.permissions import require_loan_creation_privilege, require_loan_approval_privilege, require_privileged
 
-# Import wallet functions from the wallet router
 from app.routes.wallet import get_or_create_wallet, process_wallet_transaction
 from app.models import WalletTransactionType
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/loans", tags=["Loans"])
@@ -33,7 +32,6 @@ def generate_payment_number():
 
 # ==================== HELPER FUNCTIONS ====================
 def get_wallet_from_bank_account(db: Session, bank_account_id: int, branch_id: int) -> Optional[Wallet]:
-    """Get the wallet associated with a bank account - same logic as sales.py"""
     bank_account = db.query(BankAccount).filter(
         BankAccount.id == bank_account_id,
         BankAccount.branch_id == branch_id,
@@ -43,7 +41,6 @@ def get_wallet_from_bank_account(db: Session, bank_account_id: int, branch_id: i
     if not bank_account:
         return None
     
-    # Find wallet linked to this bank account
     wallet = db.query(Wallet).filter(
         Wallet.bank_account_id == bank_account_id,
         Wallet.branch_id == branch_id,
@@ -53,8 +50,8 @@ def get_wallet_from_bank_account(db: Session, bank_account_id: int, branch_id: i
     return wallet
 
 # POST - Create loan
-@router.post("", response_model=LoanResponse)
-@router.post("/", response_model=LoanResponse)
+@router.post("")
+@router.post("/")
 def create_loan(
     loan_data: LoanCreate,
     db: Session = Depends(get_db),
@@ -68,7 +65,6 @@ def create_loan(
         raise HTTPException(status_code=400, detail="User not assigned to a branch")
     
     try:
-        # Calculate totals and validate stock
         total_amount = Decimal('0')
         loan_items_data = []
         
@@ -77,7 +73,6 @@ def create_loan(
             if not product:
                 raise HTTPException(status_code=404, detail=f"Product {item_data.product_id} not found")
             
-            # Check stock availability
             stock = db.query(Stock).filter(
                 Stock.branch_id == branch_id,
                 Stock.product_id == item_data.product_id
@@ -100,15 +95,12 @@ def create_loan(
                 "line_total": line_total
             })
         
-        # Calculate interest
         interest_amount = total_amount * (Decimal(str(loan_data.interest_rate)) / 100)
         total_with_interest = total_amount + interest_amount
         
-        # Determine if loan requires approval
         requires_approval = not current_user.is_admin()
         approval_status = "pending" if requires_approval else "approved"
         
-        # Create loan
         loan = Loan(
             loan_number=generate_loan_number(),
             branch_id=branch_id,
@@ -128,7 +120,6 @@ def create_loan(
             approval_status=approval_status
         )
         
-        # If admin created, auto-approve
         if current_user.is_admin():
             loan.approved_by = current_user.id
             loan.approved_at = datetime.now()
@@ -136,7 +127,6 @@ def create_loan(
         db.add(loan)
         db.flush()
         
-        # Add loan items and update stock
         for item_info in loan_items_data:
             loan_item = LoanItem(
                 loan_id=loan.id,
@@ -147,11 +137,9 @@ def create_loan(
             )
             db.add(loan_item)
             
-            # Deduct stock
             stock = item_info["stock"]
             stock.quantity -= item_info["data"].quantity
             
-            # Record stock movement
             stock_movement = StockMovement(
                 branch_id=branch_id,
                 product_id=item_info["data"].product_id,
@@ -186,7 +174,7 @@ def create_loan(
                 "product_name": product.name if product else None
             })
         
-        return {
+        result = {
             "id": loan.id,
             "loan_number": loan.loan_number,
             "branch_id": loan.branch_id,
@@ -211,6 +199,14 @@ def create_loan(
             "updated_at": loan.updated_at
         }
         
+        return JSONResponse(
+            content=result,
+            headers={
+                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+        
     except HTTPException:
         db.rollback()
         raise
@@ -221,6 +217,268 @@ def create_loan(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+# ============================================================
+# GET - Get all loans (BATCH LOADED - NO N+1 QUERIES)
+# ============================================================
+@router.get("")
+@router.get("/")
+def get_loans(
+    customer_name: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    branch_id: Optional[int] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all loans with filters - BATCH LOADED to avoid N+1 queries"""
+    try:
+        logger.info(f"📊 Fetching loans - User: {current_user.id}")
+        
+        # Start with base query
+        query = db.query(Loan)
+        
+        # Filter by branch
+        if branch_id:
+            query = query.filter(Loan.branch_id == branch_id)
+        elif not current_user.is_privileged():
+            if not current_user.branch_id:
+                logger.warning(f"⚠️ User {current_user.id} has no branch_id")
+                return JSONResponse(
+                    content=[],
+                    headers={
+                        "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                        "Access-Control-Allow-Credentials": "true",
+                    }
+                )
+            query = query.filter(Loan.branch_id == current_user.branch_id)
+        
+        # Apply text filters
+        if customer_name:
+            query = query.filter(Loan.customer_name.ilike(f"%{customer_name}%"))
+        if status:
+            query = query.filter(Loan.status == status)
+        
+        # Get loans with pagination
+        loans = query.order_by(Loan.created_at.desc()).offset(skip).limit(limit).all()
+        
+        if not loans:
+            return JSONResponse(
+                content=[],
+                headers={
+                    "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                    "Access-Control-Allow-Credentials": "true",
+                }
+            )
+        
+        # ✅ Get all IDs for batch loading
+        loan_ids = [loan.id for loan in loans]
+        
+        # ✅ BATCH LOAD #1: Get all loan items with product data in ONE query
+        loan_items_query = db.query(LoanItem, Product).join(
+            Product, LoanItem.product_id == Product.id
+        ).filter(LoanItem.loan_id.in_(loan_ids)).all()
+        
+        # ✅ BATCH LOAD #2: Get all payments with user data in ONE query
+        loan_payments_query = db.query(LoanPayment, User).outerjoin(
+            User, LoanPayment.recorded_by == User.id
+        ).filter(LoanPayment.loan_id.in_(loan_ids)).all()
+        
+        # ✅ BATCH LOAD #3: Get all creators in ONE query
+        creator_ids = [loan.created_by for loan in loans]
+        creators = db.query(User).filter(User.id.in_(creator_ids)).all() if creator_ids else []
+        creator_map = {u.id: u.name for u in creators}
+        
+        # ✅ BATCH LOAD #4: Get all approvers in ONE query
+        approver_ids = [loan.approved_by for loan in loans if loan.approved_by]
+        approvers = db.query(User).filter(User.id.in_(approver_ids)).all() if approver_ids else []
+        approver_map = {u.id: u.name for u in approvers}
+        
+        # Group items by loan_id
+        items_map = {}
+        for item, product in loan_items_query:
+            if item.loan_id not in items_map:
+                items_map[item.loan_id] = []
+            items_map[item.loan_id].append({
+                "id": item.id,
+                "product_id": item.product_id,
+                "quantity": item.quantity,
+                "unit_price": float(item.unit_price),
+                "line_total": float(item.line_total),
+                "product_name": product.name if product else None
+            })
+        
+        # Group payments by loan_id
+        payments_map = {}
+        for payment, user in loan_payments_query:
+            if payment.loan_id not in payments_map:
+                payments_map[payment.loan_id] = []
+            payments_map[payment.loan_id].append({
+                "id": payment.id,
+                "payment_number": payment.payment_number,
+                "payment_date": payment.payment_date,
+                "amount": float(payment.amount),
+                "payment_method": payment.payment_method,
+                "reference_number": payment.reference_number,
+                "notes": payment.notes,
+                "recorded_by": user.name if user else "System",
+                "sale_id": payment.sale_id,
+                "created_at": payment.created_at,
+                "bank_account_id": payment.bank_account_id
+            })
+        
+        # ✅ Build response with pre-loaded data (NO additional queries)
+        result = []
+        for loan in loans:
+            result.append({
+                "id": loan.id,
+                "loan_number": loan.loan_number,
+                "branch_id": loan.branch_id,
+                "customer_name": loan.customer_name,
+                "customer_phone": loan.customer_phone,
+                "customer_email": loan.customer_email,
+                "loan_date": loan.loan_date.date(),
+                "due_date": loan.due_date.date(),
+                "total_amount": float(loan.total_amount),
+                "paid_amount": float(loan.paid_amount),
+                "remaining_amount": float(loan.remaining_amount),
+                "interest_rate": float(loan.interest_rate),
+                "interest_amount": float(loan.interest_amount),
+                "status": loan.status,
+                "notes": loan.notes,
+                "items": items_map.get(loan.id, []),
+                "payments": payments_map.get(loan.id, []),
+                "created_by": creator_map.get(loan.created_by, "System"),
+                "approved_by": approver_map.get(loan.approved_by) if loan.approved_by else None,
+                "approved_at": loan.approved_at,
+                "created_at": loan.created_at,
+                "updated_at": loan.updated_at
+            })
+        
+        logger.info(f"✅ Returning {len(result)} loans (batch loaded)")
+        
+        return JSONResponse(
+            content=result,
+            headers={
+                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in get_loans: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        return JSONResponse(
+            content=[],
+            headers={
+                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+
+# ============================================================
+# GET - Get loan by ID (BATCH LOADED)
+# ============================================================
+@router.get("/{loan_id}")
+def get_loan(
+    loan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get loan by ID - BATCH LOADED"""
+    try:
+        loan = db.query(Loan).filter(Loan.id == loan_id).first()
+        
+        if not loan:
+            raise HTTPException(status_code=404, detail="Loan not found")
+        
+        if not current_user.is_privileged():
+            if not current_user.branch_id:
+                raise HTTPException(status_code=400, detail="User not assigned to a branch")
+            if loan.branch_id != current_user.branch_id:
+                raise HTTPException(status_code=403, detail="Not authorized to view this loan")
+        
+        # Get related data in 2 queries
+        items = db.query(LoanItem, Product).join(
+            Product, LoanItem.product_id == Product.id
+        ).filter(LoanItem.loan_id == loan_id).all()
+        
+        payments = db.query(LoanPayment, User).outerjoin(
+            User, LoanPayment.recorded_by == User.id
+        ).filter(LoanPayment.loan_id == loan_id).all()
+        
+        creator = db.query(User).filter(User.id == loan.created_by).first()
+        approver = db.query(User).filter(User.id == loan.approved_by).first() if loan.approved_by else None
+        
+        items_response = []
+        for item, product in items:
+            items_response.append({
+                "id": item.id,
+                "product_id": item.product_id,
+                "quantity": item.quantity,
+                "unit_price": float(item.unit_price),
+                "line_total": float(item.line_total),
+                "product_name": product.name if product else None
+            })
+        
+        payments_response = []
+        for payment, user in payments:
+            payments_response.append({
+                "id": payment.id,
+                "payment_number": payment.payment_number,
+                "payment_date": payment.payment_date,
+                "amount": float(payment.amount),
+                "payment_method": payment.payment_method,
+                "reference_number": payment.reference_number,
+                "notes": payment.notes,
+                "recorded_by": user.name if user else "System",
+                "sale_id": payment.sale_id,
+                "created_at": payment.created_at,
+                "bank_account_id": payment.bank_account_id
+            })
+        
+        result = {
+            "id": loan.id,
+            "loan_number": loan.loan_number,
+            "branch_id": loan.branch_id,
+            "customer_name": loan.customer_name,
+            "customer_phone": loan.customer_phone,
+            "customer_email": loan.customer_email,
+            "loan_date": loan.loan_date.date(),
+            "due_date": loan.due_date.date(),
+            "total_amount": float(loan.total_amount),
+            "paid_amount": float(loan.paid_amount),
+            "remaining_amount": float(loan.remaining_amount),
+            "interest_rate": float(loan.interest_rate),
+            "interest_amount": float(loan.interest_amount),
+            "status": loan.status,
+            "notes": loan.notes,
+            "items": items_response,
+            "payments": payments_response,
+            "created_by": creator.name if creator else "System",
+            "approved_by": approver.name if approver else None,
+            "approved_at": loan.approved_at,
+            "created_at": loan.created_at,
+            "updated_at": loan.updated_at
+        }
+        
+        return JSONResponse(
+            content=result,
+            headers={
+                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error in get_loan: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # POST - Approve loan (Admin only)
 @router.post("/{loan_id}/approve")
@@ -247,254 +505,21 @@ def approve_loan(
     approver = db.query(User).filter(User.id == loan.approved_by).first()
     approver_name = approver.name if approver else "System"
     
-    return {
+    result = {
         "message": "Loan approved successfully",
         "loan_id": loan.id,
         "loan_number": loan.loan_number,
         "approved_by": approver_name,
         "approved_at": loan.approved_at
     }
-
-
-# ============================================================
-# GET - Get all loans (FULLY OPTIMIZED - NO N+1 QUERIES)
-# ============================================================
-@router.get("")
-@router.get("/")
-def get_loans(
-    customer_name: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    branch_id: Optional[int] = Query(None),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get all loans with filters - FULLY OPTIMIZED with eager loading"""
-    try:
-        logger.info(f"📊 Fetching loans - User: {current_user.id}, Branch: {branch_id or current_user.branch_id}")
-        
-        # ✅ Use eager loading to avoid N+1 queries
-        query = db.query(Loan).options(
-            joinedload(Loan.branch),
-            joinedload(Loan.creator),
-            joinedload(Loan.approver),
-            selectinload(Loan.items).selectinload(LoanItem.product),
-            selectinload(Loan.payments).selectinload(LoanPayment.recorder)
-        )
-        
-        # Filter by branch_id if provided
-        if branch_id:
-            query = query.filter(Loan.branch_id == branch_id)
-        elif not current_user.is_privileged():
-            if not current_user.branch_id:
-                logger.warning(f"⚠️ User {current_user.id} has no branch_id")
-                return JSONResponse(
-                    content=[],
-                    headers={
-                        "Access-Control-Allow-Origin": "https://sefa-inventory.com",
-                        "Access-Control-Allow-Credentials": "true",
-                    }
-                )
-            query = query.filter(Loan.branch_id == current_user.branch_id)
-        
-        # Apply text filters
-        if customer_name:
-            query = query.filter(Loan.customer_name.ilike(f"%{customer_name}%"))
-        if status:
-            query = query.filter(Loan.status == status)
-        
-        # Get loans with pagination
-        loans = query.order_by(Loan.created_at.desc()).offset(skip).limit(limit).all()
-        
-        logger.info(f"✅ Found {len(loans)} loans")
-        
-        # ✅ Build response from pre-loaded data (NO additional queries)
-        result = []
-        for loan in loans:
-            # Use pre-loaded relationships
-            creator_name = loan.creator.name if loan.creator else "System"
-            approver_name = loan.approver.name if loan.approver else None
-            
-            # Build items from pre-loaded data
-            items_response = []
-            for item in loan.items:
-                items_response.append({
-                    "id": item.id,
-                    "product_id": item.product_id,
-                    "quantity": item.quantity,
-                    "unit_price": float(item.unit_price),
-                    "line_total": float(item.line_total),
-                    "product_name": item.product.name if item.product else None
-                })
-            
-            # Build payments from pre-loaded data
-            payments_response = []
-            for payment in loan.payments:
-                payments_response.append({
-                    "id": payment.id,
-                    "payment_number": payment.payment_number,
-                    "payment_date": payment.payment_date,
-                    "amount": float(payment.amount),
-                    "payment_method": payment.payment_method,
-                    "reference_number": payment.reference_number,
-                    "notes": payment.notes,
-                    "recorded_by": payment.recorder.name if payment.recorder else "System",
-                    "sale_id": payment.sale_id,
-                    "created_at": payment.created_at,
-                    "bank_account_id": payment.bank_account_id
-                })
-            
-            result.append({
-                "id": loan.id,
-                "loan_number": loan.loan_number,
-                "branch_id": loan.branch_id,
-                "customer_name": loan.customer_name,
-                "customer_phone": loan.customer_phone,
-                "customer_email": loan.customer_email,
-                "loan_date": loan.loan_date.date(),
-                "due_date": loan.due_date.date(),
-                "total_amount": float(loan.total_amount),
-                "paid_amount": float(loan.paid_amount),
-                "remaining_amount": float(loan.remaining_amount),
-                "interest_rate": float(loan.interest_rate),
-                "interest_amount": float(loan.interest_amount),
-                "status": loan.status,
-                "notes": loan.notes,
-                "items": items_response,
-                "payments": payments_response,
-                "created_by": creator_name,
-                "approved_by": approver_name,
-                "approved_at": loan.approved_at,
-                "created_at": loan.created_at,
-                "updated_at": loan.updated_at
-            })
-        
-        # Return with CORS headers
-        return JSONResponse(
-            content=result,
-            headers={
-                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
-                "Access-Control-Allow-Credentials": "true",
-            }
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Error in get_loans: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        
-        # Return empty array with CORS headers on error
-        return JSONResponse(
-            content=[],
-            headers={
-                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
-                "Access-Control-Allow-Credentials": "true",
-            }
-        )
-
-
-# ============================================================
-# GET - Get loan by ID (OPTIMIZED)
-# ============================================================
-@router.get("/{loan_id}")
-def get_loan(
-    loan_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get loan by ID - OPTIMIZED with eager loading"""
-    try:
-        # ✅ Use eager loading to avoid N+1 queries
-        loan = db.query(Loan).options(
-            joinedload(Loan.branch),
-            joinedload(Loan.creator),
-            joinedload(Loan.approver),
-            selectinload(Loan.items).selectinload(LoanItem.product),
-            selectinload(Loan.payments).selectinload(LoanPayment.recorder)
-        ).filter(Loan.id == loan_id).first()
-        
-        if not loan:
-            raise HTTPException(status_code=404, detail="Loan not found")
-        
-        if not current_user.is_privileged():
-            if not current_user.branch_id:
-                raise HTTPException(status_code=400, detail="User not assigned to a branch")
-            if loan.branch_id != current_user.branch_id:
-                raise HTTPException(status_code=403, detail="Not authorized to view this loan")
-        
-        # Use pre-loaded relationships
-        creator_name = loan.creator.name if loan.creator else "System"
-        approver_name = loan.approver.name if loan.approver else None
-        
-        items_response = []
-        for item in loan.items:
-            items_response.append({
-                "id": item.id,
-                "product_id": item.product_id,
-                "quantity": item.quantity,
-                "unit_price": float(item.unit_price),
-                "line_total": float(item.line_total),
-                "product_name": item.product.name if item.product else None
-            })
-        
-        payments_response = []
-        for payment in loan.payments:
-            payments_response.append({
-                "id": payment.id,
-                "payment_number": payment.payment_number,
-                "payment_date": payment.payment_date,
-                "amount": float(payment.amount),
-                "payment_method": payment.payment_method,
-                "reference_number": payment.reference_number,
-                "notes": payment.notes,
-                "recorded_by": payment.recorder.name if payment.recorder else "System",
-                "sale_id": payment.sale_id,
-                "created_at": payment.created_at,
-                "bank_account_id": payment.bank_account_id
-            })
-        
-        result = {
-            "id": loan.id,
-            "loan_number": loan.loan_number,
-            "branch_id": loan.branch_id,
-            "customer_name": loan.customer_name,
-            "customer_phone": loan.customer_phone,
-            "customer_email": loan.customer_email,
-            "loan_date": loan.loan_date.date(),
-            "due_date": loan.due_date.date(),
-            "total_amount": float(loan.total_amount),
-            "paid_amount": float(loan.paid_amount),
-            "remaining_amount": float(loan.remaining_amount),
-            "interest_rate": float(loan.interest_rate),
-            "interest_amount": float(loan.interest_amount),
-            "status": loan.status,
-            "notes": loan.notes,
-            "items": items_response,
-            "payments": payments_response,
-            "created_by": creator_name,
-            "approved_by": approver_name,
-            "approved_at": loan.approved_at,
-            "created_at": loan.created_at,
-            "updated_at": loan.updated_at
+    
+    return JSONResponse(
+        content=result,
+        headers={
+            "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+            "Access-Control-Allow-Credentials": "true",
         }
-        
-        return JSONResponse(
-            content=result,
-            headers={
-                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
-                "Access-Control-Allow-Credentials": "true",
-            }
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Error in get_loan: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
+    )
 
 # PUT - Update loan (Admin only)
 @router.put("/{loan_id}")
@@ -527,30 +552,29 @@ def update_loan(
     db.commit()
     db.refresh(loan)
     
-    # Reload with eager loading for response
-    loan = db.query(Loan).options(
-        joinedload(Loan.creator),
-        joinedload(Loan.approver),
-        selectinload(Loan.items).selectinload(LoanItem.product),
-        selectinload(Loan.payments).selectinload(LoanPayment.recorder)
-    ).filter(Loan.id == loan_id).first()
+    creator = db.query(User).filter(User.id == loan.created_by).first()
+    creator_name = creator.name if creator else "System"
     
-    creator_name = loan.creator.name if loan.creator else "System"
-    approver_name = loan.approver.name if loan.approver else None
+    approver_name = None
+    if loan.approved_by:
+        approver = db.query(User).filter(User.id == loan.approved_by).first()
+        approver_name = approver.name if approver else "System"
     
     items_response = []
     for item in loan.items:
+        product = db.query(Product).filter(Product.id == item.product_id).first()
         items_response.append({
             "id": item.id,
             "product_id": item.product_id,
             "quantity": item.quantity,
             "unit_price": float(item.unit_price),
             "line_total": float(item.line_total),
-            "product_name": item.product.name if item.product else None
+            "product_name": product.name if product else None
         })
     
     payments_response = []
     for payment in loan.payments:
+        recorder = db.query(User).filter(User.id == payment.recorded_by).first()
         payments_response.append({
             "id": payment.id,
             "payment_number": payment.payment_number,
@@ -559,7 +583,7 @@ def update_loan(
             "payment_method": payment.payment_method,
             "reference_number": payment.reference_number,
             "notes": payment.notes,
-            "recorded_by": payment.recorder.name if payment.recorder else "System",
+            "recorded_by": recorder.name if recorder else "System",
             "sale_id": payment.sale_id,
             "created_at": payment.created_at,
             "bank_account_id": payment.bank_account_id
@@ -597,7 +621,6 @@ def update_loan(
             "Access-Control-Allow-Credentials": "true",
         }
     )
-
 
 # DELETE - Delete loan (Admin only)
 @router.delete("/{loan_id}", status_code=204)
@@ -639,7 +662,6 @@ def delete_loan(
     
     return None
 
-
 # ==================== PAYMENT OPERATIONS ====================
 
 # POST - Add payment (Privileged users only)
@@ -662,14 +684,11 @@ def add_loan_payment(
     if payment_data.amount > loan.remaining_amount:
         raise HTTPException(status_code=400, detail="Payment amount exceeds remaining balance")
     
-    # Handle wallet payment - deposit to wallet first
     wallet = None
     if payment_data.payment_method == 'wallet':
-        # Check if bank_account_id is provided
         if not hasattr(payment_data, 'bank_account_id') or not payment_data.bank_account_id:
             raise HTTPException(status_code=400, detail="Bank account ID required for wallet payment")
         
-        # Verify bank account exists and is active
         bank_account = db.query(BankAccount).filter(
             BankAccount.id == payment_data.bank_account_id,
             BankAccount.branch_id == loan.branch_id,
@@ -684,22 +703,16 @@ def add_loan_payment(
         if wallet:
             logger.info(f"✅ Found wallet linked to bank account: '{wallet.wallet_name}' (ID: {wallet.id})")
         else:
-            # If no linked wallet, create one based on account category
             if bank_account.account_category == "vat":
                 wallet = get_or_create_wallet(db, loan.branch_id, "vat")
-                logger.info(f"✅ Creating/using VAT wallet for branch: '{wallet.wallet_name}'")
             else:
                 wallet = get_or_create_wallet(db, loan.branch_id, "regular")
-                logger.info(f"✅ Creating/using regular wallet for branch: '{wallet.wallet_name}'")
             
-            # Link the wallet to the bank account for future use
             if wallet and not wallet.bank_account_id:
                 wallet.bank_account_id = bank_account.id
                 db.flush()
-                logger.info(f"✅ Linked wallet '{wallet.wallet_name}' to bank account {bank_account.id}")
         
         if wallet:
-            # Process the deposit using the wallet router function
             transaction = process_wallet_transaction(
                 db=db,
                 wallet_id=wallet.id,
@@ -712,9 +725,8 @@ def add_loan_payment(
                 reference_id=loan.id,
                 bank_reference=str(payment_data.bank_account_id) if payment_data.bank_account_id else None
             )
-            logger.info(f"✅ Wallet deposited: {transaction.transaction_number} - Amount: {payment_data.amount} to wallet '{wallet.wallet_name}' (ID: {wallet.id})")
+            logger.info(f"✅ Wallet deposited: {transaction.transaction_number} - Amount: {payment_data.amount}")
     
-    # Create payment record
     payment = LoanPayment(
         loan_id=loan_id,
         payment_number=generate_payment_number(),
@@ -729,7 +741,6 @@ def add_loan_payment(
     
     db.add(payment)
     
-    # Update loan
     loan.paid_amount += payment_data.amount
     loan.remaining_amount -= payment_data.amount
     
@@ -770,7 +781,6 @@ def add_loan_payment(
         }
     )
 
-
 # POST - Settle loan (Privileged users only)
 @router.post("/{loan_id}/settle")
 def settle_loan(
@@ -791,14 +801,11 @@ def settle_loan(
     if settle_data.amount < loan.remaining_amount:
         raise HTTPException(status_code=400, detail=f"Amount must be at least {loan.remaining_amount} to settle")
     
-    # Handle wallet payment - deposit to wallet first
     wallet = None
     if settle_data.payment_method == 'wallet':
-        # Check if bank_account_id is provided
         if not hasattr(settle_data, 'bank_account_id') or not settle_data.bank_account_id:
             raise HTTPException(status_code=400, detail="Bank account ID required for wallet payment")
         
-        # Verify bank account exists and is active
         bank_account = db.query(BankAccount).filter(
             BankAccount.id == settle_data.bank_account_id,
             BankAccount.branch_id == loan.branch_id,
@@ -813,22 +820,16 @@ def settle_loan(
         if wallet:
             logger.info(f"✅ Found wallet linked to bank account: '{wallet.wallet_name}' (ID: {wallet.id})")
         else:
-            # If no linked wallet, create one based on account category
             if bank_account.account_category == "vat":
                 wallet = get_or_create_wallet(db, loan.branch_id, "vat")
-                logger.info(f"✅ Creating/using VAT wallet for branch: '{wallet.wallet_name}'")
             else:
                 wallet = get_or_create_wallet(db, loan.branch_id, "regular")
-                logger.info(f"✅ Creating/using regular wallet for branch: '{wallet.wallet_name}'")
             
-            # Link the wallet to the bank account for future use
             if wallet and not wallet.bank_account_id:
                 wallet.bank_account_id = bank_account.id
                 db.flush()
-                logger.info(f"✅ Linked wallet '{wallet.wallet_name}' to bank account {bank_account.id}")
         
         if wallet:
-            # Process the deposit using the wallet router function
             transaction = process_wallet_transaction(
                 db=db,
                 wallet_id=wallet.id,
@@ -841,9 +842,8 @@ def settle_loan(
                 reference_id=loan.id,
                 bank_reference=str(settle_data.bank_account_id) if settle_data.bank_account_id else None
             )
-            logger.info(f"✅ Wallet deposited for settlement: {transaction.transaction_number} - Amount: {loan.remaining_amount} to wallet '{wallet.wallet_name}' (ID: {wallet.id})")
+            logger.info(f"✅ Wallet deposited for settlement: {transaction.transaction_number}")
     
-    # Create payment for remaining amount
     payment = LoanPayment(
         loan_id=loan_id,
         payment_number=generate_payment_number(),
@@ -857,7 +857,6 @@ def settle_loan(
     
     db.add(payment)
     
-    # Update loan
     loan.paid_amount = loan.total_amount
     loan.remaining_amount = 0
     loan.status = 'settled'
@@ -865,7 +864,6 @@ def settle_loan(
     
     db.commit()
     
-    # Get bank account details for response
     bank_account_details = None
     if payment.bank_account_id:
         bank_account = db.query(BankAccount).filter(BankAccount.id == payment.bank_account_id).first()
@@ -898,7 +896,6 @@ def settle_loan(
         }
     )
 
-
 # GET - Get loan payment history
 @router.get("/{loan_id}/payments")
 def get_loan_payments(
@@ -918,13 +915,12 @@ def get_loan_payments(
         if loan.branch_id != current_user.branch_id:
             raise HTTPException(status_code=403, detail="Not authorized to view this loan")
     
-    payments = db.query(LoanPayment).filter(
-        LoanPayment.loan_id == loan_id
-    ).order_by(LoanPayment.payment_date.desc()).all()
+    payments = db.query(LoanPayment, User).outerjoin(
+        User, LoanPayment.recorded_by == User.id
+    ).filter(LoanPayment.loan_id == loan_id).order_by(LoanPayment.payment_date.desc()).all()
     
     result = []
-    for payment in payments:
-        recorder = db.query(User).filter(User.id == payment.recorded_by).first()
+    for payment, user in payments:
         result.append({
             "id": payment.id,
             "payment_number": payment.payment_number,
@@ -933,7 +929,7 @@ def get_loan_payments(
             "payment_method": payment.payment_method,
             "reference_number": payment.reference_number,
             "notes": payment.notes,
-            "recorded_by": recorder.name if recorder else "System",
+            "recorded_by": user.name if user else "System",
             "sale_id": payment.sale_id,
             "created_at": payment.created_at,
             "bank_account_id": payment.bank_account_id
@@ -946,7 +942,6 @@ def get_loan_payments(
             "Access-Control-Allow-Credentials": "true",
         }
     )
-
 
 # GET - Loan summary
 @router.get("/summary")
@@ -977,7 +972,6 @@ def get_loan_summary(
     settled_loans = sum(1 for l in loans if l.status == 'settled')
     overdue_loans = sum(1 for l in loans if l.due_date < datetime.now() and l.status != 'settled')
     
-    # Payment method breakdown
     payment_methods = {}
     for loan in loans:
         for payment in loan.payments:
