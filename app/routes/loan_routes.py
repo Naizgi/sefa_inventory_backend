@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, joinedload, selectinload
 from typing import Optional, List
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 import uuid
+import logging
 
 from app.database import get_db
 from app.models import User, Loan, LoanPayment, LoanItem, Product, Stock, StockMovement, Wallet, WalletTransaction, BankAccount
@@ -17,6 +19,9 @@ from app.utils.permissions import require_loan_creation_privilege, require_loan_
 # Import wallet functions from the wallet router
 from app.routes.wallet import get_or_create_wallet, process_wallet_transaction
 from app.models import WalletTransactionType
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/loans", tags=["Loans"])
 
@@ -161,7 +166,6 @@ def create_loan(
         db.commit()
         db.refresh(loan)
         
-        # Use pre-loaded relationships
         creator = db.query(User).filter(User.id == loan.created_by).first()
         creator_name = creator.name if creator else "System"
         
@@ -177,8 +181,8 @@ def create_loan(
                 "id": item.id,
                 "product_id": item.product_id,
                 "quantity": item.quantity,
-                "unit_price": item.unit_price,
-                "line_total": item.line_total,
+                "unit_price": float(item.unit_price),
+                "line_total": float(item.line_total),
                 "product_name": product.name if product else None
             })
         
@@ -212,7 +216,7 @@ def create_loan(
         raise
     except Exception as e:
         db.rollback()
-        print(f"Error creating loan: {str(e)}")
+        logger.error(f"Error creating loan: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -253,10 +257,10 @@ def approve_loan(
 
 
 # ============================================================
-# GET - Get all loans (OPTIMIZED - NO N+1 QUERIES)
+# GET - Get all loans (FULLY OPTIMIZED - NO N+1 QUERIES)
 # ============================================================
-@router.get("", response_model=List[LoanResponse])
-@router.get("/", response_model=List[LoanResponse])
+@router.get("")
+@router.get("/")
 def get_loans(
     customer_name: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -266,8 +270,10 @@ def get_loans(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get all loans with filters - OPTIMIZED with eager loading to prevent N+1 queries"""
+    """Get all loans with filters - FULLY OPTIMIZED with eager loading"""
     try:
+        logger.info(f"📊 Fetching loans - User: {current_user.id}, Branch: {branch_id or current_user.branch_id}")
+        
         # ✅ Use eager loading to avoid N+1 queries
         query = db.query(Loan).options(
             joinedload(Loan.branch),
@@ -282,8 +288,14 @@ def get_loans(
             query = query.filter(Loan.branch_id == branch_id)
         elif not current_user.is_privileged():
             if not current_user.branch_id:
-                print(f"⚠️ User {current_user.id} has no branch_id, returning empty list")
-                return []
+                logger.warning(f"⚠️ User {current_user.id} has no branch_id")
+                return JSONResponse(
+                    content=[],
+                    headers={
+                        "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                        "Access-Control-Allow-Credentials": "true",
+                    }
+                )
             query = query.filter(Loan.branch_id == current_user.branch_id)
         
         # Apply text filters
@@ -295,10 +307,12 @@ def get_loans(
         # Get loans with pagination
         loans = query.order_by(Loan.created_at.desc()).offset(skip).limit(limit).all()
         
+        logger.info(f"✅ Found {len(loans)} loans")
+        
         # ✅ Build response from pre-loaded data (NO additional queries)
         result = []
         for loan in loans:
-            # Use pre-loaded relationships (no additional DB queries)
+            # Use pre-loaded relationships
             creator_name = loan.creator.name if loan.creator else "System"
             approver_name = loan.approver.name if loan.approver else None
             
@@ -356,21 +370,34 @@ def get_loans(
                 "updated_at": loan.updated_at
             })
         
-        print(f"✅ Returning {len(result)} loans (optimized with eager loading)")
-        return result
+        # Return with CORS headers
+        return JSONResponse(
+            content=result,
+            headers={
+                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
         
     except Exception as e:
-        print(f"❌ Error in get_loans: {str(e)}")
+        logger.error(f"❌ Error in get_loans: {str(e)}")
         import traceback
         traceback.print_exc()
-        # Return empty list on error to prevent frontend crash
-        return []
+        
+        # Return empty array with CORS headers on error
+        return JSONResponse(
+            content=[],
+            headers={
+                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
 
 
 # ============================================================
 # GET - Get loan by ID (OPTIMIZED)
 # ============================================================
-@router.get("/{loan_id}", response_model=LoanResponse)
+@router.get("/{loan_id}")
 def get_loan(
     loan_id: int,
     db: Session = Depends(get_db),
@@ -427,7 +454,7 @@ def get_loan(
                 "bank_account_id": payment.bank_account_id
             })
         
-        return {
+        result = {
             "id": loan.id,
             "loan_number": loan.loan_number,
             "branch_id": loan.branch_id,
@@ -452,17 +479,25 @@ def get_loan(
             "updated_at": loan.updated_at
         }
         
+        return JSONResponse(
+            content=result,
+            headers={
+                "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+        
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error in get_loan: {str(e)}")
+        logger.error(f"❌ Error in get_loan: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 # PUT - Update loan (Admin only)
-@router.put("/{loan_id}", response_model=LoanResponse)
+@router.put("/{loan_id}")
 def update_loan(
     loan_id: int,
     loan_update: LoanUpdate,
@@ -530,7 +565,7 @@ def update_loan(
             "bank_account_id": payment.bank_account_id
         })
     
-    return {
+    result = {
         "id": loan.id,
         "loan_number": loan.loan_number,
         "branch_id": loan.branch_id,
@@ -554,6 +589,14 @@ def update_loan(
         "created_at": loan.created_at,
         "updated_at": loan.updated_at
     }
+    
+    return JSONResponse(
+        content=result,
+        headers={
+            "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
 
 
 # DELETE - Delete loan (Admin only)
@@ -600,7 +643,7 @@ def delete_loan(
 # ==================== PAYMENT OPERATIONS ====================
 
 # POST - Add payment (Privileged users only)
-@router.post("/{loan_id}/payments", response_model=LoanPaymentResponse)
+@router.post("/{loan_id}/payments")
 def add_loan_payment(
     loan_id: int,
     payment_data: LoanPaymentCreate,
@@ -639,21 +682,21 @@ def add_loan_payment(
         wallet = get_wallet_from_bank_account(db, bank_account.id, loan.branch_id)
         
         if wallet:
-            print(f"✅ Found wallet linked to bank account: '{wallet.wallet_name}' (ID: {wallet.id})")
+            logger.info(f"✅ Found wallet linked to bank account: '{wallet.wallet_name}' (ID: {wallet.id})")
         else:
             # If no linked wallet, create one based on account category
             if bank_account.account_category == "vat":
                 wallet = get_or_create_wallet(db, loan.branch_id, "vat")
-                print(f"✅ Creating/using VAT wallet for branch: '{wallet.wallet_name}'")
+                logger.info(f"✅ Creating/using VAT wallet for branch: '{wallet.wallet_name}'")
             else:
                 wallet = get_or_create_wallet(db, loan.branch_id, "regular")
-                print(f"✅ Creating/using regular wallet for branch: '{wallet.wallet_name}'")
+                logger.info(f"✅ Creating/using regular wallet for branch: '{wallet.wallet_name}'")
             
             # Link the wallet to the bank account for future use
             if wallet and not wallet.bank_account_id:
                 wallet.bank_account_id = bank_account.id
                 db.flush()
-                print(f"✅ Linked wallet '{wallet.wallet_name}' to bank account {bank_account.id}")
+                logger.info(f"✅ Linked wallet '{wallet.wallet_name}' to bank account {bank_account.id}")
         
         if wallet:
             # Process the deposit using the wallet router function
@@ -669,7 +712,7 @@ def add_loan_payment(
                 reference_id=loan.id,
                 bank_reference=str(payment_data.bank_account_id) if payment_data.bank_account_id else None
             )
-            print(f"✅ Wallet deposited: {transaction.transaction_number} - Amount: {payment_data.amount} to wallet '{wallet.wallet_name}' (ID: {wallet.id})")
+            logger.info(f"✅ Wallet deposited: {transaction.transaction_number} - Amount: {payment_data.amount} to wallet '{wallet.wallet_name}' (ID: {wallet.id})")
     
     # Create payment record
     payment = LoanPayment(
@@ -703,7 +746,7 @@ def add_loan_payment(
     recorder = db.query(User).filter(User.id == payment.recorded_by).first()
     recorder_name = recorder.name if recorder else "System"
     
-    return {
+    result = {
         "id": payment.id,
         "payment_number": payment.payment_number,
         "payment_date": payment.payment_date,
@@ -718,6 +761,14 @@ def add_loan_payment(
         "wallet_name": wallet.wallet_name if wallet else None,
         "wallet_id": wallet.id if wallet else None
     }
+    
+    return JSONResponse(
+        content=result,
+        headers={
+            "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
 
 
 # POST - Settle loan (Privileged users only)
@@ -760,21 +811,21 @@ def settle_loan(
         wallet = get_wallet_from_bank_account(db, bank_account.id, loan.branch_id)
         
         if wallet:
-            print(f"✅ Found wallet linked to bank account: '{wallet.wallet_name}' (ID: {wallet.id})")
+            logger.info(f"✅ Found wallet linked to bank account: '{wallet.wallet_name}' (ID: {wallet.id})")
         else:
             # If no linked wallet, create one based on account category
             if bank_account.account_category == "vat":
                 wallet = get_or_create_wallet(db, loan.branch_id, "vat")
-                print(f"✅ Creating/using VAT wallet for branch: '{wallet.wallet_name}'")
+                logger.info(f"✅ Creating/using VAT wallet for branch: '{wallet.wallet_name}'")
             else:
                 wallet = get_or_create_wallet(db, loan.branch_id, "regular")
-                print(f"✅ Creating/using regular wallet for branch: '{wallet.wallet_name}'")
+                logger.info(f"✅ Creating/using regular wallet for branch: '{wallet.wallet_name}'")
             
             # Link the wallet to the bank account for future use
             if wallet and not wallet.bank_account_id:
                 wallet.bank_account_id = bank_account.id
                 db.flush()
-                print(f"✅ Linked wallet '{wallet.wallet_name}' to bank account {bank_account.id}")
+                logger.info(f"✅ Linked wallet '{wallet.wallet_name}' to bank account {bank_account.id}")
         
         if wallet:
             # Process the deposit using the wallet router function
@@ -790,7 +841,7 @@ def settle_loan(
                 reference_id=loan.id,
                 bank_reference=str(settle_data.bank_account_id) if settle_data.bank_account_id else None
             )
-            print(f"✅ Wallet deposited for settlement: {transaction.transaction_number} - Amount: {loan.remaining_amount} to wallet '{wallet.wallet_name}' (ID: {wallet.id})")
+            logger.info(f"✅ Wallet deposited for settlement: {transaction.transaction_number} - Amount: {loan.remaining_amount} to wallet '{wallet.wallet_name}' (ID: {wallet.id})")
     
     # Create payment for remaining amount
     payment = LoanPayment(
@@ -826,7 +877,7 @@ def settle_loan(
                 "account_name": bank_account.account_name
             }
     
-    return {
+    result = {
         "message": "Loan settled successfully", 
         "payment_id": payment.id,
         "payment_number": payment.payment_number,
@@ -838,10 +889,18 @@ def settle_loan(
         "wallet_name": wallet.wallet_name if wallet else None,
         "wallet_id": wallet.id if wallet else None
     }
+    
+    return JSONResponse(
+        content=result,
+        headers={
+            "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
 
 
 # GET - Get loan payment history
-@router.get("/{loan_id}/payments", response_model=List[LoanPaymentResponse])
+@router.get("/{loan_id}/payments")
 def get_loan_payments(
     loan_id: int,
     db: Session = Depends(get_db),
@@ -880,7 +939,13 @@ def get_loan_payments(
             "bank_account_id": payment.bank_account_id
         })
     
-    return result
+    return JSONResponse(
+        content=result,
+        headers={
+            "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
 
 
 # GET - Loan summary
@@ -921,7 +986,7 @@ def get_loan_summary(
                 payment_methods[method] = 0
             payment_methods[method] += float(payment.amount)
     
-    return {
+    result = {
         "summary": {
             "total_loans": total_loans,
             "total_amount": total_amount,
@@ -933,3 +998,11 @@ def get_loan_summary(
         },
         "payment_methods": payment_methods
     }
+    
+    return JSONResponse(
+        content=result,
+        headers={
+            "Access-Control-Allow-Origin": "https://sefa-inventory.com",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
