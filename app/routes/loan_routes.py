@@ -143,7 +143,7 @@ def get_loans(
             items_map[item.loan_id].append({
                 "id": item.id,
                 "product_id": item.product_id,
-                "quantity": item.quantity,
+                "quantity": float(item.quantity),
                 "unit_price": float(item.unit_price),
                 "line_total": float(item.line_total),
                 "product_name": product.name if product else None
