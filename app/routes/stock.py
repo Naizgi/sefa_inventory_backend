@@ -323,6 +323,115 @@ def adjust_stock(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+# Add this to app/routes/stock.py
+
+# POST - Create stock movement (for stock deduction only)
+@router.post("/movements")
+def create_stock_movement(
+    movement_data: dict,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Create a stock movement for stock deduction (no financial impact).
+    Used by VAT POS for regular stock deduction.
+    """
+    try:
+        branch_id = movement_data.get('branch_id')
+        product_id = movement_data.get('product_id')
+        user_id = movement_data.get('user_id', current_user.id)
+        change_qty = movement_data.get('change_qty')
+        movement_type = movement_data.get('movement_type', 'vat_sale_deduction')
+        notes = movement_data.get('notes', '')
+        
+        if not branch_id or not product_id or change_qty is None:
+            raise HTTPException(
+                status_code=400,
+                detail="branch_id, product_id, and change_qty are required"
+            )
+        
+        # Verify branch exists
+        branch = db.query(Branch).filter(Branch.id == branch_id).first()
+        if not branch:
+            raise HTTPException(status_code=404, detail="Branch not found")
+        
+        # Verify product exists
+        product = db.query(Product).filter(Product.id == product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        # Get or create stock record
+        stock = db.query(Stock).filter(
+            Stock.branch_id == branch_id,
+            Stock.product_id == product_id
+        ).first()
+        
+        if not stock:
+            stock = Stock(
+                branch_id=branch_id,
+                product_id=product_id,
+                quantity=Decimal('0'),
+                quantity_with_vat=Decimal('0'),
+                quantity_without_vat=Decimal('0'),
+                reorder_level=Decimal('10')
+            )
+            db.add(stock)
+            db.flush()
+        
+        # Check if we have enough stock for deduction
+        if change_qty < 0 and stock.quantity + Decimal(str(change_qty)) < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient stock. Available: {float(stock.quantity)}, Requested deduction: {abs(float(change_qty))}"
+            )
+        
+        old_quantity = float(stock.quantity)
+        
+        # Update stock
+        stock.quantity = stock.quantity + Decimal(str(change_qty))
+        new_quantity = float(stock.quantity)
+        
+        # Create stock movement record
+        stock_movement = StockMovement(
+            branch_id=branch_id,
+            product_id=product_id,
+            user_id=user_id,
+            change_qty=Decimal(str(change_qty)),
+            movement_type=movement_type,
+            notes=notes or f"Stock { 'deduction' if change_qty < 0 else 'addition' } by {current_user.name} for VAT sale"
+        )
+        db.add(stock_movement)
+        db.commit()
+        db.refresh(stock_movement)
+        
+        return {
+            "success": True,
+            "message": f"Stock {'deducted' if change_qty < 0 else 'added'} successfully",
+            "movement_id": stock_movement.id,
+            "product_id": product_id,
+            "product_name": product.name,
+            "branch_id": branch_id,
+            "branch_name": branch.name,
+            "change_qty": float(change_qty),
+            "old_quantity": old_quantity,
+            "new_quantity": new_quantity,
+            "movement_type": movement_type,
+            "created_at": stock_movement.created_at.isoformat() if stock_movement.created_at else None
+        }
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error creating stock movement: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to create stock movement: {str(e)}")
+
+
+
+
 # POST - Initialize branch stock
 @router.post("/initialize/{branch_id}")
 @router.post("/initialize/{branch_id}/")
