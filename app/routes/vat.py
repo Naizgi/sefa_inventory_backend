@@ -141,40 +141,92 @@ def create_vat_purchase(
     # Use product_name from product_group if not provided
     product_name = purchase_data.product_name or purchase_data.product_group or "General Stock"
     
-    # ==================== DEDUCT FROM VAT WALLET ====================
-    # Calculate total amount to deduct (total cost including VAT)
-    total_amount_to_deduct = total_cost
+    # ==================== HANDLE PAYMENT METHOD ====================
+    wallet_transaction = None
     
-    try:
-        # Get VAT wallet for this branch
-        wallet = get_or_create_wallet(db, branch_id, "vat")
-        
-        # Process wallet transaction (deduct amount)
-        wallet_transaction = process_wallet_transaction(
-            db=db,
-            wallet_id=wallet.id,
-            transaction_type=WalletTransactionType.PURCHASE.value,
-            amount=total_amount_to_deduct,
-            description=f"VAT Purchase - SKU: {purchase_data.sku} - Supplier: {purchase_data.supplier_name} - Qty: {quantity}",
-            user_id=current_user.id,
-            reference_type="vat_purchase",
-            reference_id=None  # Will be updated after creating the purchase
-        )
-        print(f"✅ VAT Wallet deducted: {wallet_transaction.transaction_number} - Amount: {total_amount_to_deduct}")
-        
-    except Exception as wallet_error:
-        print(f"⚠️ VAT Wallet deduction failed: {wallet_error}")
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Wallet deduction failed: {str(wallet_error)}. Insufficient funds or wallet inactive."
-        )
+    # 🔥 CRITICAL FIX: Check if this is a wallet payment
+    use_wallet_payment = getattr(purchase_data, 'use_wallet_payment', False)
     
-    # Create VAT purchase record - product_id is now optional
+    print(f"💰 Payment Method: {'WALLET' if use_wallet_payment else 'CASH'}")
+    print(f"💰 use_wallet_payment: {use_wallet_payment}")
+    
+    # 🔥 ONLY deduct from wallet if use_wallet_payment is True
+    if use_wallet_payment:
+        # WALLET PAYMENT - Deduct from specified wallet
+        total_amount_to_deduct = total_cost
+        
+        try:
+            # Get wallet ID from request
+            wallet_id = getattr(purchase_data, 'wallet_id', None)
+            
+            if not wallet_id:
+                # Fallback: Get branch's VAT wallet
+                wallet = get_or_create_wallet(db, branch_id, "vat")
+                wallet_id = wallet.id
+                print(f"ℹ️ No wallet_id provided, using branch VAT wallet: {wallet_id}")
+            
+            # Get the wallet with proper validation
+            wallet = db.query(Wallet).filter(
+                Wallet.id == wallet_id,
+                Wallet.branch_id == branch_id,  # Must belong to this branch
+                Wallet.is_active == True
+            ).first()
+            
+            if not wallet:
+                # Try to find any active wallet for this branch
+                wallet = db.query(Wallet).filter(
+                    Wallet.branch_id == branch_id,
+                    Wallet.is_active == True
+                ).first()
+                
+                if not wallet:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"No active wallet found for branch {branch_id}"
+                    )
+                
+                print(f"⚠️ Wallet {wallet_id} not found, using fallback wallet: {wallet.id}")
+            
+            # Check if wallet has sufficient balance
+            if wallet.balance < total_amount_to_deduct:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient funds in wallet '{wallet.wallet_name}'. Balance: {wallet.balance}, Required: {total_amount_to_deduct}"
+                )
+            
+            # Process wallet transaction (deduct amount)
+            wallet_transaction = process_wallet_transaction(
+                db=db,
+                wallet_id=wallet.id,
+                transaction_type=WalletTransactionType.PURCHASE.value,
+                amount=total_amount_to_deduct,
+                description=f"VAT Purchase - SKU: {purchase_data.sku} - Supplier: {purchase_data.supplier_name} - Qty: {quantity}",
+                user_id=current_user.id,
+                reference_type="vat_purchase",
+                reference_id=None
+            )
+            print(f"✅ Wallet deducted: {wallet_transaction.transaction_number} - Amount: {total_amount_to_deduct} from wallet {wallet.id}")
+            
+        except HTTPException:
+            raise
+        except Exception as wallet_error:
+            print(f"⚠️ Wallet deduction failed: {wallet_error}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Wallet deduction failed: {str(wallet_error)}"
+            )
+    else:
+        # 🔥 CASH PAYMENT - Skip wallet deduction entirely
+        print(f"💰 Cash payment - NO wallet deduction")
+    
+    # Create VAT purchase record
     vat_purchase = VATPurchase(
         vat_number=generate_vat_number("VAT-PUR", branch_id),
         purchase_order_id=purchase_data.purchase_order_id,
         branch_id=branch_id,
-        product_id=purchase_data.product_id,  # Can be None
+        product_id=purchase_data.product_id,
         product_name=product_name,
         product_group=purchase_data.product_group or "Uncategorized",
         sku=purchase_data.sku,
@@ -191,12 +243,13 @@ def create_vat_purchase(
         invoice_number=purchase_data.invoice_number,
         purchase_date=purchase_data.purchase_date,
         notes=purchase_data.notes,
-        status='paid',  # Set status to 'paid' for stock that's ready to sell
+        use_wallet_payment=use_wallet_payment,  # Store payment method
+        status='paid',
         created_by=current_user.id
     )
     
     db.add(vat_purchase)
-    db.flush()  # Get the ID without committing yet
+    db.flush()
     
     # Update the wallet transaction with the reference ID
     if wallet_transaction:
@@ -209,7 +262,7 @@ def create_vat_purchase(
     # Record stock movement
     stock_movement = StockMovement(
         branch_id=branch_id,
-        product_id=purchase_data.product_id,  # Can be None
+        product_id=purchase_data.product_id,
         user_id=current_user.id,
         change_qty=quantity,
         movement_type="vat_purchase_in",
@@ -227,7 +280,6 @@ def create_vat_purchase(
             Stock.product_id == purchase_data.product_id
         ).first()
     else:
-        # For SKU-based stock, find by sku or create generic
         stock = db.query(Stock).filter(
             Stock.branch_id == branch_id,
             Stock.product_id.is_(None)
@@ -242,7 +294,7 @@ def create_vat_purchase(
     else:
         stock = Stock(
             branch_id=branch_id,
-            product_id=purchase_data.product_id,  # Can be None
+            product_id=purchase_data.product_id,
             quantity=quantity,
             quantity_with_vat=quantity if vat_rate > 0 else Decimal('0'),
             quantity_without_vat=quantity if vat_rate == 0 else Decimal('0'),
@@ -253,7 +305,6 @@ def create_vat_purchase(
     db.commit()
     
     return vat_purchase
-
 
 @router.get("/purchases", response_model=List[VATPurchaseResponse])
 def get_vat_purchases(
