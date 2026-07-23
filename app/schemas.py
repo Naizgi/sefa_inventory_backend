@@ -112,6 +112,7 @@ class WalletTransactionMethod(str, Enum):
     CARD = "card"
     MOBILE_MONEY = "mobile_money"
     INTERNAL_TRANSFER = "internal_transfer"
+    WALLET_PAYMENT = "wallet_payment"  # ADDED THIS
 
 # ==================== DATE RANGE SCHEMA ====================
 class DateRange(BaseModel):
@@ -561,10 +562,17 @@ class PurchaseOrderBase(BaseModel):
     payment_reference: Optional[str] = None
     payment_date: Optional[date] = None
 
+# ==================== ADD WALLET ALLOCATION SCHEMA ====================
+class WalletAllocation(BaseModel):
+    wallet_id: int
+    amount: float = Field(gt=0)
+
+# ==================== UPDATE PURCHASE ORDER CREATE ====================
 class PurchaseOrderCreate(PurchaseOrderBase):
     items: List[PurchaseOrderItemCreate]
     use_wallet_payment: bool = False
     wallet_id: Optional[int] = None
+    wallet_allocations: Optional[List[WalletAllocation]] = []  # ADD THIS - Multi-wallet support
 
 class PurchaseOrderUpdate(BaseModel):
     status: Optional[PurchaseStatus] = None
@@ -607,6 +615,7 @@ class PurchaseOrderResponse(PurchaseOrderBase):
     wallet_id: Optional[int] = None
     wallet_name: Optional[str] = None
     wallet_transaction_id: Optional[int] = None
+    wallet_transactions: Optional[List[dict]] = []  # ADD THIS - List of all wallet transactions
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -951,7 +960,7 @@ class DamagedGoodsCreate(DamagedGoodsBase):
     pass
 
 class DamagedGoodsUpdate(BaseModel):
-    status: Optional[DamagedGoodsStatus] = None
+    status: Optional[DamagedGoodsStatus] = None   
     notes: Optional[str] = None
 
 class DamagedGoodsApprove(BaseModel):

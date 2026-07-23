@@ -40,6 +40,10 @@ DEFAULT_VAT_RATE = Decimal('15.00')
 def generate_order_number():
     return f"PO-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
+def generate_transaction_number():
+    """Generate a unique transaction number for wallet transactions"""
+    return f"WT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+
 def calculate_purchase_totals(
     subtotal: Decimal, 
     vat_rate: Optional[Decimal] = None, 
@@ -72,6 +76,165 @@ def calculate_purchase_totals(
         'vat_rate': actual_vat_rate,
         'vat_amount': vat_amount,
         'total_amount': total_amount
+    }
+
+# ==================== MULTI-WALLET PROCESSING FUNCTION ====================
+def process_multiple_wallet_allocations(
+    db: Session,
+    wallet_allocations: List[dict],
+    branch_id: int,
+    user_id: int,
+    reference_type: str,
+    reference_id: int,
+    description_prefix: str = ""
+) -> dict:
+    """
+    Process multiple wallet allocations for a purchase.
+    Each allocation should have 'wallet_id' and 'amount'.
+    Creates a separate transaction record for EACH wallet.
+    Returns summary of processed allocations.
+    """
+    from app.models import Wallet, WalletTransaction
+    
+    results = []
+    total_processed = Decimal('0')
+    errors = []
+    
+    if not wallet_allocations:
+        return {
+            'success': False,
+            'error': 'No wallet allocations provided',
+            'results': []
+        }
+    
+    print(f"📊 Processing {len(wallet_allocations)} wallet allocations...")
+    
+    for idx, allocation in enumerate(wallet_allocations):
+        # Handle both dict and object formats
+        if isinstance(allocation, dict):
+            wallet_id = allocation.get('wallet_id')
+            amount = allocation.get('amount')
+        else:
+            wallet_id = getattr(allocation, 'wallet_id', None)
+            amount = getattr(allocation, 'amount', 0)
+        
+        print(f"   [{idx+1}] Wallet ID: {wallet_id}, Amount: {amount}")
+        
+        if not wallet_id:
+            errors.append({'wallet_id': None, 'error': 'Wallet ID is required'})
+            continue
+            
+        if not amount or amount <= 0:
+            errors.append({'wallet_id': wallet_id, 'error': 'Amount must be greater than 0'})
+            continue
+            
+        # Convert to Decimal
+        amount = Decimal(str(amount))
+        
+        # Get wallet
+        wallet = db.query(Wallet).filter(
+            Wallet.id == wallet_id,
+            Wallet.branch_id == branch_id,
+            Wallet.is_active == True
+        ).first()
+        
+        if not wallet:
+            errors.append({
+                'wallet_id': wallet_id,
+                'error': f'Wallet not found or inactive'
+            })
+            continue
+        
+        # Check sufficient balance
+        if wallet.balance < amount:
+            errors.append({
+                'wallet_id': wallet_id,
+                'wallet_name': wallet.wallet_name,
+                'error': f'Insufficient balance. Available: {float(wallet.balance)}, Required: {float(amount)}',
+                'balance': float(wallet.balance),
+                'required': float(amount)
+            })
+            continue
+        
+        # Save old balance before deduction
+        old_balance = wallet.balance
+        
+        # Deduct from wallet
+        wallet.balance -= amount
+        
+        # Generate unique transaction number for THIS wallet
+        transaction_number = generate_transaction_number()
+        
+        # Create transaction record for THIS wallet
+        description = f"{description_prefix} - {wallet.wallet_name}" if description_prefix else f"Payment from {wallet.wallet_name}"
+        
+        transaction = WalletTransaction(
+            transaction_number=transaction_number,
+            wallet_id=wallet.id,
+            transaction_type=WalletTransactionType.PURCHASE.value,
+            transaction_method='wallet_payment',
+            amount=amount,
+            from_wallet_id=None,
+            to_wallet_id=None,
+            balance_before=old_balance,
+            balance_after=wallet.balance,
+            status='completed',
+            approval_status='approved',
+            approved_by=None,
+            approved_at=None,
+            reference_type=reference_type,
+            reference_id=reference_id,
+            reference_number=None,
+            bank_transaction_id=None,
+            bank_reference=None,
+            bank_account_id=None,
+            description=description,
+            attachments=None,
+            notes=None,
+            created_by=user_id,
+            created_at=datetime.utcnow(),
+            updated_at=None
+        )
+        db.add(transaction)
+        
+        # Flush to get the transaction ID
+        db.flush()
+        
+        total_processed += amount
+        
+        # Store result for this wallet
+        results.append({
+            'wallet_id': wallet_id,
+            'wallet_name': wallet.wallet_name,
+            'amount': float(amount),
+            'old_balance': float(old_balance),
+            'new_balance': float(wallet.balance),
+            'transaction_id': transaction.id,
+            'transaction_number': transaction_number,
+            'success': True
+        })
+        
+        print(f"✅ Wallet deducted: {wallet.wallet_name} - Amount: {float(amount)} - Transaction: {transaction_number}")
+    
+    # Commit all transactions
+    db.commit()
+    
+    # Check if any errors occurred
+    if errors:
+        return {
+            'success': len(results) > 0,
+            'partial_success': len(results) > 0,
+            'total_processed': float(total_processed),
+            'results': results,
+            'errors': errors
+        }
+    
+    print(f"✅ All {len(results)} wallet allocations processed successfully!")
+    return {
+        'success': True,
+        'total_processed': float(total_processed),
+        'results': results,
+        'errors': []
     }
 
 # ==================== LEGACY PURCHASE ROUTES ====================
@@ -247,7 +410,7 @@ def create_purchase_order(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Create a new purchase order with VAT, shipping, labour, other costs, and wallet payment"""
+    """Create a new purchase order with VAT, shipping, labour, other costs, and multi-wallet payment"""
     
     if not current_user.branch_id:
         raise HTTPException(status_code=400, detail="User not assigned to a branch")
@@ -283,26 +446,96 @@ def create_purchase_order(
     
     # Check if using wallet payment
     use_wallet_payment = getattr(purchase_data, 'use_wallet_payment', False)
+    
+    # ============ IMPORTANT: Get wallet_allocations from request ============
+    wallet_allocations = []
+    
+    # Try to get wallet_allocations from the request data
+    if hasattr(purchase_data, 'wallet_allocations') and purchase_data.wallet_allocations:
+        for alloc in purchase_data.wallet_allocations:
+            if hasattr(alloc, 'dict'):
+                # If it's a Pydantic model
+                wallet_allocations.append(alloc.dict())
+            elif isinstance(alloc, dict):
+                # If it's already a dict
+                wallet_allocations.append(alloc)
+            else:
+                # Try to access as object attributes
+                wallet_allocations.append({
+                    'wallet_id': getattr(alloc, 'wallet_id', None),
+                    'amount': getattr(alloc, 'amount', 0)
+                })
+    
+    # Also check if wallet_id is provided (backward compatibility)
     wallet_id = getattr(purchase_data, 'wallet_id', None)
     
-    # If using wallet payment, validate wallet and check balance
-    if use_wallet_payment and wallet_id:
-        from app.models import Wallet
-        wallet = db.query(Wallet).filter(
-            Wallet.id == wallet_id,
-            Wallet.branch_id == current_user.branch_id,
-            Wallet.is_active == True
-        ).first()
+    print(f"📊 Received wallet_allocations: {wallet_allocations}")
+    print(f"📊 Received wallet_id: {wallet_id}")
+    print(f"📊 use_wallet_payment: {use_wallet_payment}")
+    
+    # ==================== VALIDATE WALLET ALLOCATIONS ====================
+    total_allocated = Decimal('0')
+    
+    if use_wallet_payment:
+        # If using old single wallet_id, convert to wallet_allocations
+        if wallet_id and not wallet_allocations:
+            wallet_allocations = [{'wallet_id': wallet_id, 'amount': float(totals['total_amount'])}]
+            print(f"📊 Converted single wallet to allocation: {wallet_allocations}")
         
-        if not wallet:
-            raise HTTPException(status_code=404, detail="Wallet not found or inactive")
-        
-        # Check if wallet has sufficient balance
-        if wallet.balance < totals['total_amount']:
+        # Validate wallet allocations
+        if not wallet_allocations:
             raise HTTPException(
                 status_code=400, 
-                detail=f"Insufficient balance in wallet '{wallet.wallet_name}'. "
-                       f"Available: {float(wallet.balance)}, Required: {float(totals['total_amount'])}"
+                detail="Wallet payment selected but no wallet allocations provided"
+            )
+        
+        # Process allocations for validation only (don't deduct yet)
+        from app.models import Wallet
+        total_allocated = Decimal('0')
+        
+        for allocation in wallet_allocations:
+            # Handle both dict and object
+            if isinstance(allocation, dict):
+                alloc_wallet_id = allocation.get('wallet_id')
+                amount = allocation.get('amount')
+            else:
+                alloc_wallet_id = getattr(allocation, 'wallet_id', None)
+                amount = getattr(allocation, 'amount', 0)
+            
+            if not alloc_wallet_id:
+                raise HTTPException(status_code=400, detail="Wallet ID is required for each allocation")
+            
+            if not amount or amount <= 0:
+                raise HTTPException(status_code=400, detail="Amount must be greater than 0 for each allocation")
+            
+            amount = Decimal(str(amount))
+            total_allocated += amount
+            
+            # Check if wallet exists and has sufficient balance
+            wallet = db.query(Wallet).filter(
+                Wallet.id == alloc_wallet_id,
+                Wallet.branch_id == current_user.branch_id,
+                Wallet.is_active == True
+            ).first()
+            
+            if not wallet:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Wallet {alloc_wallet_id} not found or inactive"
+                )
+            
+            if wallet.balance < amount:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Insufficient balance in wallet '{wallet.wallet_name}'. "
+                           f"Available: {float(wallet.balance)}, Required: {float(amount)}"
+                )
+        
+        # Check if total allocated matches total amount
+        if abs(total_allocated - totals['total_amount']) > Decimal('0.01'):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Total allocated ({float(total_allocated)}) does not match total amount ({float(totals['total_amount'])})"
             )
     
     # Get bank account info if not using wallet payment
@@ -344,7 +577,7 @@ def create_purchase_order(
         payment_date=datetime.combine(purchase_data.payment_date, datetime.min.time()) if hasattr(purchase_data, 'payment_date') and purchase_data.payment_date else None,
         # Wallet payment tracking
         use_wallet_payment=use_wallet_payment,
-        wallet_id=wallet_id if use_wallet_payment else None
+        wallet_id=None  # We'll store the first wallet ID for backward compatibility
     )
     
     db.add(purchase_order)
@@ -372,29 +605,51 @@ def create_purchase_order(
     db.commit()
     db.refresh(purchase_order)
     
-    # ==================== DEDUCT FROM WALLET IF USING WALLET PAYMENT ====================
-    if use_wallet_payment and wallet_id:
+    # ==================== DEDUCT FROM MULTIPLE WALLETS ====================
+    wallet_transactions = []
+    if use_wallet_payment and wallet_allocations:
         try:
-            wallet = db.query(Wallet).filter(Wallet.id == wallet_id).first()
-            if wallet:
-                # Process wallet transaction (deduct amount)
-                transaction = process_wallet_transaction(
-                    db=db,
-                    wallet_id=wallet_id,
-                    transaction_type=WalletTransactionType.PURCHASE.value,
-                    amount=totals['total_amount'],
-                    description=f"Purchase Order Created: {purchase_order.order_number} - Supplier: {purchase_data.supplier}",
-                    user_id=current_user.id,
-                    reference_type="purchase_order",
-                    reference_id=purchase_order.id
-                )
-                print(f"✅ Wallet deducted for PO #{purchase_order.order_number}: {transaction.transaction_number} - Amount: {totals['total_amount']}")
+            print(f"📊 Starting wallet deduction for {len(wallet_allocations)} wallets...")
+            
+            # Process all wallet allocations - creates separate transaction for EACH wallet
+            result = process_multiple_wallet_allocations(
+                db=db,
+                wallet_allocations=wallet_allocations,
+                branch_id=current_user.branch_id,
+                user_id=current_user.id,
+                reference_type="purchase_order",
+                reference_id=purchase_order.id,
+                description_prefix=f"Purchase Order: {purchase_order.order_number} - Supplier: {purchase_data.supplier}"
+            )
+            
+            if result['success']:
+                wallet_transactions = result['results']
+                # Store the first wallet ID for backward compatibility
+                if wallet_transactions:
+                    purchase_order.wallet_id = wallet_transactions[0]['wallet_id']
+                    purchase_order.wallet_transaction_id = wallet_transactions[0].get('transaction_id')
                 
-                # Update purchase order with transaction reference
-                purchase_order.wallet_transaction_id = transaction.id
+                # Log all successful transactions
+                print(f"\n✅ Multi-wallet deduction completed for PO #{purchase_order.order_number}")
+                print(f"   Total wallets: {len(wallet_transactions)}")
+                for txn in wallet_transactions:
+                    print(f"   💳 {txn['wallet_name']}: {txn['amount']} (Transaction: {txn['transaction_number']})")
+                
                 db.commit()
+            else:
+                # If no success and there are errors, raise exception
+                error_messages = [e.get('error', 'Unknown error') for e in result.get('errors', [])]
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Wallet deduction failed: {'; '.join(error_messages)}"
+                )
+                
+        except HTTPException:
+            raise
         except Exception as wallet_error:
             print(f"⚠️ Wallet deduction failed for PO #{purchase_order.order_number}: {wallet_error}")
+            import traceback
+            traceback.print_exc()
             # Re-raise to prevent order creation if wallet deduction fails
             raise HTTPException(status_code=400, detail=f"Wallet deduction failed: {str(wallet_error)}")
     
@@ -447,6 +702,7 @@ def create_purchase_order(
         "payment_date": purchase_order.payment_date,
         "use_wallet_payment": purchase_order.use_wallet_payment,
         "wallet_id": purchase_order.wallet_id,
+        "wallet_transactions": wallet_transactions,
         "wallet_transaction_id": purchase_order.wallet_transaction_id
     }
 
@@ -502,6 +758,26 @@ def get_purchase_orders(
                 if wallet:
                     wallet_name = wallet.wallet_name
             
+            # Get all wallet transactions for this order
+            wallet_transactions = []
+            if order.use_wallet_payment:
+                from app.models import WalletTransaction
+                transactions = db.query(WalletTransaction).filter(
+                    WalletTransaction.reference_type == "purchase_order",
+                    WalletTransaction.reference_id == order.id
+                ).all()
+                for txn in transactions:
+                    wallet = db.query(Wallet).filter(Wallet.id == txn.wallet_id).first()
+                    wallet_transactions.append({
+                        "wallet_id": txn.wallet_id,
+                        "wallet_name": wallet.wallet_name if wallet else "Unknown",
+                        "amount": float(txn.amount),
+                        "balance_before": float(txn.balance_before) if hasattr(txn, 'balance_before') else None,
+                        "balance_after": float(txn.balance_after),
+                        "transaction_number": txn.transaction_number if hasattr(txn, 'transaction_number') else None,
+                        "created_at": txn.created_at.isoformat() if hasattr(txn, 'created_at') and txn.created_at else None
+                    })
+            
             items_response = []
             for item in order.items:
                 product = db.query(Product).filter(Product.id == item.product_id).first()
@@ -549,6 +825,7 @@ def get_purchase_orders(
                 "use_wallet_payment": order.use_wallet_payment,
                 "wallet_id": order.wallet_id,
                 "wallet_name": wallet_name,
+                "wallet_transactions": wallet_transactions,
                 "wallet_transaction_id": order.wallet_transaction_id
             })
         
@@ -585,11 +862,30 @@ def get_purchase_order(
     
     # Get wallet info if using wallet payment
     wallet_name = None
-    if order.use_wallet_payment and order.wallet_id:
-        from app.models import Wallet
-        wallet = db.query(Wallet).filter(Wallet.id == order.wallet_id).first()
-        if wallet:
-            wallet_name = wallet.wallet_name
+    wallet_transactions = []
+    if order.use_wallet_payment:
+        from app.models import Wallet, WalletTransaction
+        if order.wallet_id:
+            wallet = db.query(Wallet).filter(Wallet.id == order.wallet_id).first()
+            if wallet:
+                wallet_name = wallet.wallet_name
+        
+        # Get all wallet transactions for this order
+        transactions = db.query(WalletTransaction).filter(
+            WalletTransaction.reference_type == "purchase_order",
+            WalletTransaction.reference_id == order.id
+        ).all()
+        for txn in transactions:
+            wallet = db.query(Wallet).filter(Wallet.id == txn.wallet_id).first()
+            wallet_transactions.append({
+                "wallet_id": txn.wallet_id,
+                "wallet_name": wallet.wallet_name if wallet else "Unknown",
+                "amount": float(txn.amount),
+                "balance_before": float(txn.balance_before) if hasattr(txn, 'balance_before') else None,
+                "balance_after": float(txn.balance_after),
+                "transaction_number": txn.transaction_number if hasattr(txn, 'transaction_number') else None,
+                "created_at": txn.created_at.isoformat() if hasattr(txn, 'created_at') and txn.created_at else None
+            })
     
     items_response = []
     for item in order.items:
@@ -638,6 +934,7 @@ def get_purchase_order(
         "use_wallet_payment": order.use_wallet_payment,
         "wallet_id": order.wallet_id,
         "wallet_name": wallet_name,
+        "wallet_transactions": wallet_transactions,
         "wallet_transaction_id": order.wallet_transaction_id
     }
 
@@ -833,11 +1130,30 @@ def update_purchase_order(
     
     # Get wallet info if using wallet payment
     wallet_name = None
-    if purchase_order.use_wallet_payment and purchase_order.wallet_id:
-        from app.models import Wallet
-        wallet = db.query(Wallet).filter(Wallet.id == purchase_order.wallet_id).first()
-        if wallet:
-            wallet_name = wallet.wallet_name
+    wallet_transactions = []
+    if purchase_order.use_wallet_payment:
+        from app.models import Wallet, WalletTransaction
+        if purchase_order.wallet_id:
+            wallet = db.query(Wallet).filter(Wallet.id == purchase_order.wallet_id).first()
+            if wallet:
+                wallet_name = wallet.wallet_name
+        
+        # Get all wallet transactions for this order
+        transactions = db.query(WalletTransaction).filter(
+            WalletTransaction.reference_type == "purchase_order",
+            WalletTransaction.reference_id == purchase_order.id
+        ).all()
+        for txn in transactions:
+            wallet = db.query(Wallet).filter(Wallet.id == txn.wallet_id).first()
+            wallet_transactions.append({
+                "wallet_id": txn.wallet_id,
+                "wallet_name": wallet.wallet_name if wallet else "Unknown",
+                "amount": float(txn.amount),
+                "balance_before": float(txn.balance_before) if hasattr(txn, 'balance_before') else None,
+                "balance_after": float(txn.balance_after),
+                "transaction_number": txn.transaction_number if hasattr(txn, 'transaction_number') else None,
+                "created_at": txn.created_at.isoformat() if hasattr(txn, 'created_at') and txn.created_at else None
+            })
     
     items_response = []
     for item in purchase_order.items:
@@ -886,6 +1202,7 @@ def update_purchase_order(
         "use_wallet_payment": purchase_order.use_wallet_payment,
         "wallet_id": purchase_order.wallet_id,
         "wallet_name": wallet_name,
+        "wallet_transactions": wallet_transactions,
         "wallet_transaction_id": purchase_order.wallet_transaction_id
     }
 
